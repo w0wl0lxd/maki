@@ -472,6 +472,17 @@ case("format_tag_line_truncates_above_cap", function()
   assert(line:find("2 tags omitted"), "should report omitted count")
   assert(line:find("%.%.%."), "should contain ellipsis")
   assert(line:find("^tag1, tag2, tag3 "), "first three tags shown in order before ellipsis")
+  assert(line:find("to stay under 3%."), "prune hint should include max_tags")
+  rmtree(tmpdir)
+end)
+
+case("format_tag_line_below_cap_no_prune_hint", function()
+  local tmpdir = mktmpdir()
+  maki.fs.write(maki.fs.joinpath(tmpdir, "f1.md"), "---\ntags:\n  - tag1\n---\n1")
+  maki.fs.write(maki.fs.joinpath(tmpdir, "f2.md"), "---\ntags:\n  - tag2\n---\n2")
+
+  local line = format_tag_line(tmpdir, 50)
+  assert(not line:find("stay under"), "no prune hint below cap")
   rmtree(tmpdir)
 end)
 

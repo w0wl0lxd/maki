@@ -278,6 +278,7 @@ function M.format_tag_line(dir, max_tags)
       shown[i] = tags[i]
     end
     line = table.concat(shown, ", ") .. " ... (" .. omitted .. " tags omitted; use `list` to see all)"
+    line = line .. ". Consider removing or consolidating stale memories to stay under " .. max_tags .. "."
   end
   if #warnings > 0 then
     line = line .. " (unreadable: " .. #warnings .. ")"

@@ -241,21 +241,23 @@ local function matching_entries(dir, want)
   end)
 
   local matches = {}
+  local warnings = {}
   for _, f in ipairs(entries) do
     local name, size = f[1], f[2]
     local path = maki.fs.joinpath(dir, name)
     local content, read_err = maki.fs.read(path)
     if not content then
-      return nil, "read error: " .. name .. ": " .. tostring(read_err)
-    end
-    for _, t in ipairs(M.tags_for_file(name, content)) do
-      if want[t] then
-        matches[#matches + 1] = { name = name, content = content, size = size }
-        break
+      warnings[#warnings + 1] = name .. ": " .. tostring(read_err)
+    else
+      for _, t in ipairs(M.tags_for_file(name, content)) do
+        if want[t] then
+          matches[#matches + 1] = { name = name, content = content, size = size }
+          break
+        end
       end
     end
   end
-  return matches, nil
+  return matches, warnings
 end
 
 function M.format_tag_line(dir, max_tags)
@@ -398,9 +400,10 @@ function M.format_read(dir, raw_tags)
     return nil, err
   end
 
-  local matches, merr = matching_entries(dir, want)
-  if merr then
-    return nil, merr
+  local matches, read_warnings = matching_entries(dir, want)
+  if #read_warnings > 0 then
+    local rw = "warning: unreadable memory files: " .. table.concat(read_warnings, ", ")
+    warning = warning and (warning .. "\n" .. rw) or rw
   end
 
   local parts = {}

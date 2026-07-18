@@ -2607,6 +2607,7 @@ dependencies = [
  "maki-providers",
  "maki-storage",
  "mlua",
+ "nucleo-matcher",
  "regex",
  "serde_json",
  "serde_yaml",

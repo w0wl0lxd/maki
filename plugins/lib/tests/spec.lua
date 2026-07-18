@@ -1132,7 +1132,7 @@ case("render_lines_default_width_used", function()
   local lines_default = render_lines(items, 1)
   local lines_explicit = render_lines(items, 1, 80)
   eq(#lines_default[1], #lines_explicit[1], "default width should be 80")
-  eq(lines_default[1][2][1], lines_explicit[1][2][1])
+  eq(lines_default[1][1][1], lines_explicit[1][1][1])
 end)
 
 case("render_lines_mixed_string_and_table", function()
@@ -1151,7 +1151,7 @@ case("render_lines_trailing_omitted_when_label_fills_width", function()
 end)
 
 case("render_lines_match_highlight_selected", function()
-  local lines = render_lines({ "alpha", "beta" }, 1, 40, "lph")
+  local lines = render_lines({ "alpha" }, 1, 40, { { 2, 3, 4 } })
   eq(lines[1][1][1], "  a")
   eq(lines[1][1][2], "selected")
   eq(lines[1][2][1], "lph")
@@ -1161,13 +1161,72 @@ case("render_lines_match_highlight_selected", function()
 end)
 
 case("render_lines_match_highlight_not_selected", function()
-  local lines = render_lines({ "beta", "alpha" }, 2, 40, "et")
+  local lines = render_lines({ "beta", "alpha" }, 2, 40, { { 2, 3 }, { 1, 2 } })
   eq(lines[1][1][1], "  b")
   eq(lines[1][1][2], "item")
   eq(lines[1][2][1], "et")
   eq(lines[1][2][2], "match")
   eq(lines[1][3][1], "a")
   eq(lines[1][3][2], "item")
+end)
+
+case("render_lines_fuzzy_noncontiguous_highlight", function()
+  local lines = render_lines({ "axc" }, 1, 40, { { 1, 3 } })
+  eq(lines[1][1][1], "  a")
+  eq(lines[1][1][2], "match_selected")
+  eq(lines[1][2][1], "x")
+  eq(lines[1][2][2], "selected")
+  eq(lines[1][3][1], "c")
+  eq(lines[1][3][2], "match_selected")
+end)
+
+case("render_lines_multibyte_highlight_by_codepoint", function()
+  local lines = render_lines({ "café" }, 1, 40, { { 1, 4 } })
+  eq(lines[1][1][1], "  c")
+  eq(lines[1][1][2], "match_selected")
+  eq(lines[1][2][1], "af", "non-matched middle codepoints grouped")
+  eq(lines[1][2][2], "selected")
+  eq(lines[1][3][1], "é", "é kept whole, not split mid-byte")
+  eq(lines[1][3][2], "match_selected")
+end)
+
+case("render_lines_section_header_inserted", function()
+  local items = {
+    { label = "a", section = "auth" },
+    { label = "b", section = "auth" },
+    { label = "c", section = "storage" },
+  }
+  local lines = render_lines(items, 1, 40)
+  eq(lines[1][1][1], "  auth")
+  eq(lines[1][1][2], "section")
+  eq(lines[2][1][1], "  a")
+  eq(lines[3][1][1], "  b")
+  eq(lines[4][1][1], "  storage", "no blank line between sections")
+  eq(lines[5][1][1], "  c")
+end)
+
+case("render_lines_selected_row_accounts_for_headers", function()
+  local items = {
+    { label = "a", section = "auth" },
+    { label = "b", section = "auth" },
+    { label = "c", section = "storage" },
+  }
+  local _, row1 = render_lines(items, 1, 40)
+  eq(row1, 2, "item 1 is on row 2 (after auth header)")
+
+  local _, row2 = render_lines(items, 2, 40)
+  eq(row2, 3, "item 2 is on row 3")
+
+  local _, row3 = render_lines(items, 3, 40)
+  eq(row3, 5, "item 3 is on row 5 (after storage header, no blank)")
+end)
+
+case("render_lines_no_section_header_for_first_when_nil", function()
+  local items = { "plain", { label = "x", section = "grp" } }
+  local lines = render_lines(items, 1, 40)
+  eq(lines[1][1][1], "  plain", "no section header for nil-section first item")
+  eq(lines[2][1][1], "  grp", "no blank before grp section")
+  eq(lines[3][1][1], "  x")
 end)
 
 case("render_lines_detail_right_pad_always_present", function()
@@ -1181,11 +1240,23 @@ local filter_items = ListPicker._filter_items
 
 case("filter_items_empty_query_returns_all", function()
   local items = { "alpha", "beta", "gamma" }
-  local filtered, indices = filter_items(items, "")
+  local filtered, indices, positions = filter_items(items, "")
   eq(#filtered, 3)
   eq(indices[1], 1)
   eq(indices[2], 2)
   eq(indices[3], 3)
+  eq(#positions[1], 0, "empty query has no highlight positions")
+end)
+
+case("filter_items_fuzzy_subsequence", function()
+  local items = { "alpha", "beta", "gamma" }
+  local filtered, indices, positions = filter_items(items, "lph")
+  eq(#filtered, 1, "only alpha contains lph as a subsequence")
+  eq(filtered[1], "alpha")
+  eq(indices[1], 1)
+  eq(positions[1][1], 2, "l at pos 2")
+  eq(positions[1][2], 3, "p at pos 3")
+  eq(positions[1][3], 4, "h at pos 4")
 end)
 
 case("filter_items_case_insensitive", function()

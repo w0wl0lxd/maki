@@ -61,6 +61,7 @@ a string belongs.
 | [`maki.env`](#maki-env) | Paths to maki's own directories (config, state, legacy). |
 | [`maki.fn`](#maki-fn) | Process and environment helpers, modeled after Neovim's `vim.fn` job |
 | [`maki.fs`](#maki-fs) | File-system utilities, modelled after `vim.fs` and `vim.uv`. |
+| [`maki.fuzzy`](#maki-fuzzy) | Fuzzy matching utilities. |
 | [`maki.image`](#maki-image) | Small building blocks for working with images: probe metadata, decode |
 | [`maki.image.Image`](#maki-image-Image) | A decoded image you can inspect, resize, and re-encode. |
 | [`maki.interpreter`](#maki-interpreter) | Run Python code in a memory-safe, time-limited sandbox. |
@@ -1725,6 +1726,43 @@ for _, file in ipairs(hits) do
     end
   end
 end
+```
+
+
+## maki.fuzzy {#maki-fuzzy}
+
+Fuzzy matching utilities.
+
+```lua
+local m = maki.fuzzy.match("abc", {"axbyc", "xyz"})
+```
+
+---
+
+### `maki.fuzzy.match()` {#maki-fuzzy-match}
+
+```lua
+maki.fuzzy.match({query}, {strings})
+```
+
+Fuzzy-match {query} against each string in {strings}. Returns a list of
+matches in input order. Each match is a table with `index` (1-based into
+{strings}), `score` (u16, higher is better), and `positions` (1-based
+codepoint offsets for highlighting). Empty {query} matches every string
+with empty `positions`; empty strings never match.
+
+**Parameters:**
+
+- `{query}` (`string`) Subsequence to search for. Smart case.
+- `{strings}` (`string[]`) Candidate strings.
+
+**Returns:** (`table`) List of match tables.
+
+**Example:**
+
+```lua
+local m = maki.fuzzy.match("abc", {"axbyc", "xyz"})
+-- m[1].index == 1, m[1].positions == {1, 3, 5}
 ```
 
 

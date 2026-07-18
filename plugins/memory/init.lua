@@ -34,18 +34,11 @@ maki.api.register_prompt_hint({
     if not dir then
       return nil
     end
-    local entries = helpers.collect_file_entries(dir)
-    if #entries == 0 then
+    local tag_line = helpers.format_tag_line(dir, helpers.MAX_TAGS)
+    if not tag_line then
       return nil
     end
-    table.sort(entries, function(a, b)
-      return a[1] < b[1]
-    end)
-    local out = "\n\nMemory files (use the memory tool to view/update):\n"
-    for _, e in ipairs(entries) do
-      out = out .. "- " .. e[1] .. " (" .. e[2] .. " bytes)\n"
-    end
-    return out
+    return "\n\nMemory tags (use `list` then `read tags=[...]` to retrieve): " .. tag_line .. "\n"
   end,
 })
 
@@ -75,10 +68,7 @@ local function render_content(content, path, ctx)
   return buf
 end
 
-local function cmd_view(path, dir, ctx)
-  if not path then
-    return helpers.list_memories(dir)
-  end
+local function cmd_read(path, dir, ctx)
   local file_path, err = helpers.safe_resolve(dir, path)
   if not file_path then
     return nil, err
@@ -87,34 +77,38 @@ local function cmd_view(path, dir, ctx)
   if not content then
     return nil, "read error: " .. err
   end
+  local meta = maki.fs.metadata(file_path)
+  local size = meta and meta.size or #content
+  local formatted = helpers.format_read_entry(path, size, content)
   return {
-    llm_output = content,
-    body = render_content(content, path, ctx),
+    llm_output = formatted,
+    body = render_content(formatted, path, ctx),
   }
 end
 
-local function cmd_write(path, content, dir, ctx)
-  local lc = helpers.count_lines(content)
-  if lc > helpers.MAX_LINES_PER_FILE then
-    return nil, "content exceeds " .. helpers.MAX_LINES_PER_FILE .. " lines (" .. lc .. " lines); reduce content size"
-  end
+local function cmd_write(path, content, tags, dir, ctx)
   local file_path, err = helpers.safe_resolve(dir, path)
   if not file_path then
     return nil, err
   end
-  local meta = maki.fs.metadata(file_path)
-  local existing_size = meta and meta.size or 0
-  if helpers.dir_total_bytes(dir) - existing_size + #content > helpers.MAX_DIR_BYTES then
-    return nil, "memory directory would exceed " .. helpers.MAX_DIR_BYTES .. " byte limit; delete stale entries first"
+
+  local normalized, verr = helpers.validate_write_tags(tags)
+  if verr then
+    return nil, verr
   end
+  local full = helpers.encode_frontmatter(normalized) .. content
   maki.fs.mkdir(dir, { parents = true })
-  local ok, write_err = maki.fs.write(file_path, content)
+  local ok, write_err = maki.fs.write(file_path, full)
   if not ok then
     return nil, "write error: " .. tostring(write_err)
   end
   return {
-    llm_output = "wrote " .. path .. " (" .. lc .. " lines)",
-    body = render_content(content, path, ctx),
+    llm_output = "wrote "
+      .. path
+      .. " (tags: "
+      .. (#normalized > 0 and table.concat(normalized, ", ") or "none")
+      .. ")",
+    body = render_content(full, path, ctx),
   }
 end
 
@@ -136,58 +130,81 @@ end
 maki.api.register_tool({
   name = "memory",
   description = "Persistent, project-scoped scratchpad for learnings, patterns, decisions, and gotchas across sessions.\n\n"
+    .. "- Memory files carry a `tags:` frontmatter list (snake_case) for retrieval.\n"
+    .. "- Available tags are listed in your system prompt; use `list` (no args) to see the full grouped index.\n"
     .. "- Save important context before compaction or to build up project knowledge.\n"
     .. "- Keep entries concise and current. Delete outdated information.",
 
   schema = {
     type = "object",
     properties = {
-      command = { type = "string", description = "Command: view, write, delete", required = true },
-      path = { type = "string", description = "Relative path (e.g. 'architecture.md'). Omit to list all." },
-      content = { type = "string", description = "File content for 'write'" },
+      command = {
+        type = "string",
+        description = "Commands:\n"
+          .. "- `list [tags=[...]]`: tag-grouped index (no bodies); pass tags to filter.\n"
+          .. "- `read path=X | tags=[...]`: one file body (path) or collated bodies (tags).\n"
+          .. "- `write path=X tags=[...] content=Y`: create or overwrite a memory.\n"
+          .. "- `delete path=X`: delete one file.",
+        required = true,
+      },
+      path = {
+        type = "string",
+        description = "File path (relative, e.g. 'architecture.md'). Used by read, write, delete.",
+      },
+      content = { type = "string", description = "Body for write (frontmatter added automatically)." },
+      tags = {
+        type = "array",
+        items = { type = "string" },
+        description = "Tag list for list (filter) and read (selector) and write (assign). snake_case normalized.",
+      },
     },
   },
 
   header = function(input)
+    local parts = { input.command or "" }
     if input.path then
-      return (input.command or "") .. " " .. input.path
+      parts[#parts + 1] = input.path
+    elseif input.tags then
+      parts[#parts + 1] = table.concat(input.tags, ",")
     end
-    return input.command
+    return table.concat(parts, " ")
   end,
 
   restore = function(input, output, _is_error, ctx)
     local content = (input.command == "write" and input.content) or output
-    return render_content(content, input.path or "file.md", ctx)
+    return render_content(content, input.path or "memory.md", ctx)
   end,
 
   handler = function(input, ctx)
+    local verr = helpers.validate_input(input)
+    if verr then
+      return { llm_output = "error: " .. verr, is_error = true }
+    end
     local cmd = input.command
-    local dir, dir_err = resolve_dir(cmd == "view")
+    local has_path = input.path ~= nil and input.path ~= ""
+    local has_tags = type(input.tags) == "table" and #input.tags > 0
+    local read_only = cmd == "list" or cmd == "read"
+    local dir, dir_err = resolve_dir(read_only)
     if not dir then
       return { llm_output = "error: " .. dir_err, is_error = true }
     end
 
     local result, err
-    if cmd == "view" then
-      result, err = cmd_view(input.path, dir, ctx)
+    if cmd == "list" then
+      result, err = helpers.format_list(dir, input.tags)
+      if result == nil and not err then
+        result = "No memories yet."
+      end
+    elseif cmd == "read" then
+      if has_tags then
+        result, err = helpers.format_read(dir, input.tags)
+      else
+        result, err = cmd_read(input.path, dir, ctx)
+      end
     elseif cmd == "write" then
-      if not input.path then
-        return { llm_output = "error: 'path' is required for write", is_error = true }
-      end
-      if not input.content then
-        return { llm_output = "error: 'content' is required for write", is_error = true }
-      end
-      result, err = cmd_write(input.path, input.content, dir, ctx)
+      result, err = cmd_write(input.path, input.content, input.tags, dir, ctx)
     elseif cmd == "delete" then
-      if not input.path then
-        return { llm_output = "error: 'path' is required for delete", is_error = true }
-      end
       result, err = cmd_delete(input.path, dir)
-    else
-      return {
-        llm_output = "error: unknown command '" .. tostring(cmd) .. "'. Valid commands: view, write, delete",
-        is_error = true,
-      }
     end
     if err then
       return { llm_output = "error: " .. err, is_error = true }
@@ -195,6 +212,22 @@ maki.api.register_tool({
     return result
   end,
 })
+
+local function popup_build_items(dir)
+  local groups = helpers.grouped_tags(dir)
+  if not groups then
+    return {}
+  end
+
+  local items = {}
+  for _, g in ipairs(groups) do
+    local section = g.tag .. " (" .. #g.files .. ")"
+    for _, f in ipairs(g.files) do
+      items[#items + 1] = { label = f.name, detail = "(" .. f.size .. " bytes)", section = section }
+    end
+  end
+  return items
+end
 
 maki.api.register_command({
   name = "/memory",
@@ -206,26 +239,13 @@ maki.api.register_command({
       return
     end
 
-    local entries = helpers.collect_file_entries(dir)
-    if #entries == 0 then
-      maki.ui.flash("No memory files yet")
-      return
-    end
-    table.sort(entries, function(a, b)
-      return a[1] < b[1]
-    end)
-
-    local function build_items()
-      local items = {}
-      for _, e in ipairs(entries) do
-        items[#items + 1] = { label = e[1], detail = "(" .. e[2] .. " bytes)" }
-      end
-      return items
-    end
-
+    local items = popup_build_items(dir)
     local last_cursor = 1
     while true do
-      local event = ListPicker.open(build_items(), {
+      if last_cursor > #items then
+        last_cursor = math.max(1, #items)
+      end
+      local event = ListPicker.open(items, {
         title = " Memory Files ",
         cursor = last_cursor,
         submit_keys = { "ctrl+o" },
@@ -242,28 +262,22 @@ maki.api.register_command({
 
       last_cursor = event.index
       if event.type == "choice" then
-        local item = entries[event.index]
+        local item = items[event.index]
         if item then
-          local path = maki.fs.joinpath(dir, item[1])
+          local path = maki.fs.joinpath(dir, item.label)
           local code = maki.ui.open_editor(path)
           if code == 0 then
-            local meta = maki.fs.metadata(path)
-            if meta then
-              item[2] = meta.size
-            end
+            items = popup_build_items(dir)
           end
         end
       elseif event.type == "delete" then
-        local item = entries[event.index]
-        local ok, err = maki.fs.rm(maki.fs.joinpath(dir, item[1]))
+        local item = items[event.index]
+        local ok, err = maki.fs.rm(maki.fs.joinpath(dir, item.label))
         if ok then
-          maki.ui.flash("Deleted " .. item[1])
-          table.remove(entries, event.index)
-          if #entries == 0 then
+          maki.ui.flash("Deleted " .. item.label)
+          items = popup_build_items(dir)
+          if #items == 0 then
             break
-          end
-          if last_cursor > #entries then
-            last_cursor = #entries
           end
         else
           maki.ui.flash("Delete failed: " .. tostring(err))

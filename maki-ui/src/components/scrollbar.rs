@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::style::{Color, Style};
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
 
 pub const SCROLLBAR_THUMB: &str = "\u{2590}";
@@ -23,6 +24,7 @@ pub fn render_vertical_scrollbar(frame: &mut Frame, area: Rect, content_len: u16
 
     let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
         .thumb_symbol(SCROLLBAR_THUMB)
+        .thumb_style(Style::new().fg(Color::Reset).bg(Color::Reset))
         .track_symbol(None)
         .begin_symbol(None)
         .end_symbol(None);

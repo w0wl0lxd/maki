@@ -5,6 +5,7 @@ pub(crate) mod base64;
 pub(crate) mod env;
 pub(crate) mod r#fn;
 pub(crate) mod fs;
+pub(crate) mod fuzzy;
 pub(crate) mod image;
 pub(crate) mod interpreter;
 pub(crate) mod json;
@@ -43,6 +44,7 @@ pub(crate) fn create_maki_global(
     maki.set("api", api)?;
     maki.set("env", env::create_env_table(lua, permissions)?)?;
     maki.set("fs", fs::create_fs_table(lua, permissions)?)?;
+    maki.set("fuzzy", fuzzy::create_fuzzy_table(lua)?)?;
     maki.set("log", log::create_log_table(lua, Arc::clone(&plugin))?)?;
     maki.set("treesitter", treesitter::create_treesitter_table(lua)?)?;
     maki.set("uv", uv::create_uv_table(lua, permissions)?)?;

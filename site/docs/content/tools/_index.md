@@ -181,9 +181,10 @@ Persistent, project-scoped scratchpad for learnings, patterns, decisions, and go
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `command` | string | yes | Command: view, write, delete |
-| `content` | string | no | File content for 'write' |
-| `path` | string | no | Relative path (e.g. 'architecture.md'). Omit to list all. |
+| `command` | string | yes | Commands:<br>- `list [tags=[...]]`: tag-grouped index (no bodies); pass tags to filter.<br>- `read path=X | tags=[...]`: one file body (path) or collated bodies (tags).<br>- `write path=X tags=[...] content=Y`: create or overwrite a memory.<br>- `delete path=X`: delete one file. |
+| `content` | string | no | Body for write (frontmatter added automatically). |
+| `path` | string | no | File path (relative, e.g. 'architecture.md'). Used by read, write, delete. |
+| `tags` | array | no | Tag list for list (filter) and read (selector) and write (assign). snake_case normalized. |
 
 ### `skill` *(lua plugin)*
 

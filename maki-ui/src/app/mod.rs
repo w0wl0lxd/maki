@@ -726,8 +726,9 @@ impl App {
             if entry.key == key.code && entry.modifiers == key.modifiers {
                 if let Some(ref handle) = self.lua_event_handle {
                     handle.run_keybind_callback(entry.id);
+                    return true;
                 }
-                return true;
+                return false;
             }
         }
         false

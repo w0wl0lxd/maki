@@ -575,7 +575,9 @@ mod tests {
         let handle = host.event_handle().expect("host is live");
         handle.run_keybind_callback(entry.id);
 
-        let deadline = Instant::now() + Duration::from_secs(2);
+        // The callback runs on the async runtime; poll the command snapshot
+        // until the side effect is visible or a short deadline passes.
+        let deadline = Instant::now() + Duration::from_millis(500);
         loop {
             let cmds = &host.command_reader().load().commands;
             if cmds.iter().any(|c| c.name.as_ref() == "/fired") {
@@ -583,9 +585,9 @@ mod tests {
             }
             assert!(
                 Instant::now() < deadline,
-                "keybind callback did not register /fired within 2s"
+                "keybind callback did not register /fired within 500ms"
             );
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::yield_now();
         }
     }
 

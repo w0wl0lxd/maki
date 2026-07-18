@@ -2302,6 +2302,7 @@ fn override_shadows_builtin_ctrl_when_no_overlay_open() {
     let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
     let mut app = test_app();
     app.keymap_reader = reader;
+    app.lua_event_handle = Some(maki_lua::EventHandle::disconnected_for_test());
     assert!(!app.help_modal.is_open());
 
     let actions = app.update(Msg::Key(kb::HELP.to_key_event()));
@@ -2326,6 +2327,7 @@ fn override_shadows_quit_builtin() {
     let mut app = test_app();
     app.status = Status::Idle;
     app.keymap_reader = reader;
+    app.lua_event_handle = Some(maki_lua::EventHandle::disconnected_for_test());
 
     let actions = app.update(Msg::Key(kb::QUIT.to_key_event()));
 
@@ -2350,6 +2352,7 @@ fn override_shadows_tab_mode_toggle() {
     let mut app = test_app();
     let initial_mode = app.state.mode;
     app.keymap_reader = reader;
+    app.lua_event_handle = Some(maki_lua::EventHandle::disconnected_for_test());
 
     let actions = app.update(Msg::Key(key(KeyCode::Tab)));
 
@@ -2372,6 +2375,7 @@ fn override_shadows_esc_builtin() {
     let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
     let mut app = test_app();
     app.keymap_reader = reader;
+    app.lua_event_handle = Some(maki_lua::EventHandle::disconnected_for_test());
 
     let actions = app.update(Msg::Key(key(KeyCode::Esc)));
 
@@ -2395,6 +2399,7 @@ fn override_does_not_shadow_suspend() {
     let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
     let mut app = test_app();
     app.keymap_reader = reader;
+    app.lua_event_handle = Some(maki_lua::EventHandle::disconnected_for_test());
 
     let actions = app.update(Msg::Key(kb::SUSPEND.to_key_event()));
 
@@ -2426,8 +2431,8 @@ fn overlay_wins_over_override_when_plan_form_open() {
     let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
     let mut app = plan_app();
     app.keymap_reader = reader;
+    app.lua_event_handle = Some(maki_lua::EventHandle::disconnected_for_test());
     assert!(app.plan_form.is_visible());
-    assert!(app.lua_event_handle.is_none());
 
     app.update(Msg::Key(kb::PLAN_TOGGLE.to_key_event()));
 

@@ -1244,12 +1244,6 @@ impl LuaRuntime {
                 return Ok(LuaValue::Boolean(true));
             }
 
-            if let Some(module) = docs_render::virtual_module(lua, &modname) {
-                let module = module?;
-                loaded.set(modname.as_str(), module.clone())?;
-                return Ok(LuaValue::Table(module));
-            }
-
             loading.set(modname.as_str(), true)?;
 
             let rel_path = modname.replace('.', "/") + ".lua";
@@ -1288,6 +1282,11 @@ impl LuaRuntime {
 
             let Some(source) = source_str else {
                 let _ = loading.set(modname.as_str(), LuaValue::Nil);
+                if let Some(module) = docs_render::virtual_module(lua, &modname) {
+                    let module = module?;
+                    loaded.set(modname.as_str(), module.clone())?;
+                    return Ok(LuaValue::Table(module));
+                }
                 return Err(mlua::Error::runtime(format!(
                     "require '{modname}': module not found"
                 )));

@@ -1,3 +1,5 @@
+local ToolView = require("maki.tool_view")
+
 local items = {}
 local buf = nil
 local win = nil
@@ -125,10 +127,8 @@ maki.api.register_tool({
     if #items == 0 then
       return nil
     end
-    render_panel(false)
-    local body = maki.ui.buf()
-    body:set_lines(build_lines())
-    return body
+    update_hint()
+    return ToolView.restore_lines(build_lines(), { max_lines = 5, keep = "head" })
   end,
 
   handler = function(input)
@@ -143,7 +143,7 @@ maki.api.register_tool({
     local first = not seen_first
     seen_first = true
     render_panel(first)
-    return ""
+    return { llm_output = "", body = ToolView.restore_lines(build_lines(), { max_lines = 5, keep = "head" }) }
   end,
 })
 

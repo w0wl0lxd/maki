@@ -1,5 +1,7 @@
 local ToolView = require("maki.tool_view")
 
+local DEFAULT_PREVIEW_LINES = 5
+
 local items = {}
 local buf = nil
 local win = nil
@@ -128,7 +130,7 @@ maki.api.register_tool({
       return nil
     end
     update_hint()
-    return ToolView.restore_lines(build_lines(), { max_lines = 5, keep = "head" })
+    return ToolView.restore_lines(build_lines(), { max_lines = DEFAULT_PREVIEW_LINES, keep = "head" })
   end,
 
   handler = function(input)
@@ -143,7 +145,10 @@ maki.api.register_tool({
     local first = not seen_first
     seen_first = true
     render_panel(first)
-    return { llm_output = "", body = ToolView.restore_lines(build_lines(), { max_lines = 5, keep = "head" }) }
+    return {
+      llm_output = "",
+      body = ToolView.restore_lines(build_lines(), { max_lines = DEFAULT_PREVIEW_LINES, keep = "head" }),
+    }
   end,
 })
 

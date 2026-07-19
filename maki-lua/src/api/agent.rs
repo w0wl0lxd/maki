@@ -888,15 +888,14 @@ async fn prompt(
 /// Poll the session for a progress snapshot while a prompt is running.
 ///
 /// Returns a table with:
-///   `elapsed_ms` (integer): time since the prompt started.
+///   `elapsed_ms` (integer): time since the session was created.
 ///   `current_tool` (string?): name of the tool currently running, if any.
 ///   `recent_tools` (table): names of the last few finished tools, oldest first.
+///   `completed_count` (integer): total number of finished tools so far.
 ///   `done` (bool): true once the prompt has completed.
 ///
 /// The call returns at most every `PROGRESS_TIMEOUT_MS` milliseconds, or
 /// immediately when a tool starts or finishes.
-///
-/// @return (table?, string?) Snapshot table on success, or `(nil, err)` on failure.
 #[lua_fn]
 async fn get_progress(lua: Lua, this: mlua::UserDataRef<LuaSession>) -> LuaResult<Pair<Table>> {
     let progress = Arc::clone(&this.progress);

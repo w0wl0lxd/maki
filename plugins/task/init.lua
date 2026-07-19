@@ -90,76 +90,36 @@ end
 local function make_preview(ctx, description)
   local tol = ctx:tool_output_lines()
   local max_preview = (tol and tol.task) or DEFAULT_OUTPUT_LINES
-  local buf = maki.ui.buf()
-  local all_lines = {}
-  local expanded = false
+  local view = ToolView.new(maki.ui.buf(), { max_lines = max_preview, keep = "tail" })
   local last_completed = 0
-  local last_progress = { elapsed_ms = 0, current_tool = nil, done = false }
 
-  local function render(progress)
+  local function update(progress)
+    if progress.completed_count > last_completed then
+      local new_count = progress.completed_count - last_completed
+      local recent = progress.recent_tools
+      local start = new_count <= #recent and (#recent - new_count + 1) or 1
+      for i = start, #recent do
+        view:append({ { "✓ " .. recent[i], "dim" } })
+      end
+      last_completed = progress.completed_count
+    end
+
     local elapsed = math.floor(progress.elapsed_ms / 1000)
     local elapsed_str = maki.ui.humantime(elapsed)
     local header = { { description .. " · " .. elapsed_str, "bold" } }
-    local lines = {}
-    lines[1] = header
-
-    local current_line
     if progress.current_tool then
-      current_line = { { "▸ " .. progress.current_tool, "bold" } }
+      header[#header + 1] = { { "▸ " .. progress.current_tool, "bold" } }
     elseif not progress.done then
-      current_line = { { "Starting...", "dim" } }
+      header[#header + 1] = { { "Starting...", "dim" } }
     end
-    if current_line then
-      lines[#lines + 1] = current_line
-    end
-
-    local shown = expanded and all_lines or {}
-    if not expanded then
-      local start = math.max(1, #all_lines - max_preview + 1)
-      for i = start, #all_lines do
-        shown[#shown + 1] = all_lines[i]
-      end
-    end
-
-    if not expanded and #all_lines > max_preview then
-      lines[#lines + 1] = { { "... (" .. (#all_lines - max_preview) .. " lines) (click to expand)", "dim" } }
-    end
-    for _, line in ipairs(shown) do
-      lines[#lines + 1] = line
-    end
-
-    buf:set_lines(lines)
+    view:set_header(header)
   end
 
-  local function append_recent(progress)
-    if progress.completed_count <= last_completed then
-      return
-    end
-    local new_count = progress.completed_count - last_completed
-    local recent = progress.recent_tools
-    local start = new_count <= #recent and (#recent - new_count + 1) or 1
-    for i = start, #recent do
-      all_lines[#all_lines + 1] = { { "✓ " .. recent[i], "dim" } }
-    end
-    last_completed = progress.completed_count
-  end
-
-  local function update(progress)
-    if progress then
-      last_progress = progress
-    else
-      progress = last_progress
-    end
-    append_recent(progress)
-    render(progress)
-  end
-
-  buf:on("click", function()
-    expanded = not expanded
-    update(nil)
+  view.buf:on("click", function()
+    view:toggle()
   end)
 
-  return { buf = buf, update = update }
+  return { buf = view.buf, update = update }
 end
 
 local function handler(input, ctx)

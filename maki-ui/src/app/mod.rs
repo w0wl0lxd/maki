@@ -14,7 +14,7 @@ pub(crate) mod shell;
 mod tests;
 pub(crate) mod view;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -139,7 +139,7 @@ pub(super) enum PendingInput {
         subagent_id: Option<String>,
     },
     SubagentFollowUp {
-        subagent_id: String,
+        queue: VecDeque<String>,
     },
 }
 
@@ -898,14 +898,22 @@ impl App {
     }
 
     pub(crate) fn handle_submit(&mut self, sub: Submission) -> Vec<Action> {
-        match std::mem::take(&mut self.pending_input) {
+        match &mut self.pending_input {
             PendingInput::AuthRetry { subagent_id } => {
-                self.send_to_agent(subagent_id.as_deref(), String::new());
+                let id = subagent_id.clone();
+                self.pending_input = PendingInput::None;
+                self.send_to_agent(id.as_deref(), String::new());
                 return vec![];
             }
-            PendingInput::SubagentFollowUp { subagent_id } => {
-                self.send_subagent_prompt(&subagent_id, sub.text);
-                return vec![];
+            PendingInput::SubagentFollowUp { queue } => {
+                if let Some(subagent_id) = queue.pop_front() {
+                    self.send_subagent_prompt(&subagent_id, sub.text);
+                    if queue.is_empty() {
+                        self.pending_input = PendingInput::None;
+                    }
+                    return vec![];
+                }
+                self.pending_input = PendingInput::None;
             }
             PendingInput::None => {}
         }
@@ -1145,7 +1153,16 @@ impl App {
 
         if let ChatEventResult::SubagentInputRequired = result {
             if let Some(id) = subagent_id {
-                self.pending_input = PendingInput::SubagentFollowUp { subagent_id: id };
+                match &mut self.pending_input {
+                    PendingInput::SubagentFollowUp { queue } => {
+                        queue.push_back(id.clone());
+                    }
+                    other => {
+                        let mut queue = VecDeque::new();
+                        queue.push_back(id.clone());
+                        *other = PendingInput::SubagentFollowUp { queue };
+                    }
+                }
                 self.chats[chat_idx].push(DisplayMessage::new(
                     DisplayRole::Assistant,
                     "Waiting for your follow-up...".into(),

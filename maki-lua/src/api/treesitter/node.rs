@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use maki_lua_macro::{lua_class, lua_fn};
 use mlua::{AnyUserData, Function, Lua, MultiValue, Result as LuaResult, Value};
@@ -194,30 +193,28 @@ fn named_children(lua: &Lua, this: &LuaNode) -> LuaResult<mlua::Table> {
 /// end
 #[lua_fn]
 fn iter_children(lua: &Lua, this: &LuaNode) -> LuaResult<Function> {
-    let count = this.node.child_count() as u32;
-    let mut entries: Vec<(LuaNode, Option<String>)> = Vec::with_capacity(count as usize);
-    for i in 0..count {
-        if let Some(child) = this.node.child(i) {
-            let field = this.node.field_name_for_child(i).map(str::to_owned);
-            entries.push((this.wrap(child), field));
-        }
-    }
-    let idx = Arc::new(AtomicUsize::new(0));
-    let entries = Arc::new(entries);
+    let node = this.node;
+    let tree = Arc::clone(&this.tree);
+    let idx = std::cell::Cell::new(0usize);
     lua.create_function(move |lua, ()| {
-        let i = idx.fetch_add(1, Ordering::Relaxed);
-        if i >= entries.len() {
-            return Ok(MultiValue::new());
+        let i = idx.get();
+        if i >= node.child_count() {
+            return Ok(mlua::MultiValue::new());
         }
-        let (ref lua_node, ref field) = entries[i];
-        let child = lua_node.clone();
-        Ok(MultiValue::from_iter([
-            Value::UserData(lua.create_userdata(child)?),
-            match field {
-                Some(s) => Value::String(lua.create_string(s)?),
-                None => Value::Nil,
-            },
-        ]))
+        idx.set(i + 1);
+        if let Some(child) = node.child(i as u32) {
+            let field = node.field_name_for_child(i as u32);
+            let child_node = LuaNode::new(child, Arc::clone(&tree));
+            Ok(mlua::MultiValue::from_iter([
+                mlua::Value::UserData(lua.create_userdata(child_node)?),
+                match field {
+                    Some(s) => mlua::Value::String(lua.create_string(s)?),
+                    None => mlua::Value::Nil,
+                },
+            ]))
+        } else {
+            Ok(mlua::MultiValue::new())
+        }
     })
 }
 

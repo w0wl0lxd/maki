@@ -534,11 +534,7 @@ async fn glob(lua: Lua, pattern: Value, opts: Option<Table>) -> LuaResult<(Value
             }
             entries.into_iter().map(|(_, s)| s).collect()
         } else {
-            let bounded: Box<dyn Iterator<Item = _>> = match limit {
-                Some(lim) => Box::new(iter.take(lim)),
-                None => Box::new(iter),
-            };
-            bounded
+            iter.take(limit.unwrap_or(usize::MAX))
                 .filter_map(|e| e.into_path().to_str().map(|s| s.to_owned()))
                 .collect()
         };

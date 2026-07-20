@@ -26,8 +26,15 @@ fn split(lua: &Lua, s: mlua::String, sep: mlua::String, opts: Option<Value>) -> 
     let mut parts: Vec<mlua::String> = Vec::new();
 
     if sep.as_bytes().is_empty() {
-        for i in 0..bytes.len() {
-            parts.push(lua.create_string(&bytes[i..=i])?);
+        if let Ok(s_str) = s.to_str() {
+            for c in s_str.chars() {
+                let mut buf = [0; 4];
+                parts.push(lua.create_string(c.encode_utf8(&mut buf))?);
+            }
+        } else {
+            for i in 0..bytes.len() {
+                parts.push(lua.create_string(&bytes[i..=i])?);
+            }
         }
         return lua.create_sequence_from(parts);
     }

@@ -475,14 +475,13 @@ pub fn run(params: SdkParams) -> Result<()> {
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
     let working_dir = cwd.to_string_lossy().into_owned();
-    let (session_id, initial_history) = resolve_session(&cli, &working_dir)?;
+    let startup_model = model.clone();
+    let (session_id, initial_history) = resolve_session(&cli, &working_dir, &startup_model)?;
 
     let (mcp_handle, mcp_config_errors) = smol::block_on(mcp::start(&cwd));
     if !mcp_config_errors.is_empty() {
         eprintln!("MCP config error: {mcp_config_errors}");
     }
-
-    let startup_model = model.clone();
     let handle = headless::spawn_interactive(InteractiveParams {
         model,
         config,
@@ -645,7 +644,7 @@ pub fn run(params: SdkParams) -> Result<()> {
 
 type StoredSession = Session<Message, TokenUsage, ToolOutput>;
 
-fn resolve_session(cli: &Cli, cwd: &str) -> Result<(Option<SessionRef>, Vec<Message>)> {
+fn resolve_session(cli: &Cli, cwd: &str, model: &Model) -> Result<(Option<SessionRef>, Vec<Message>)> {
     let (resumed_id, history) = if let Some(id) = &cli.session {
         let storage = StateDir::resolve().context("resolve state dir")?;
         let session_ref: SessionRef = id
@@ -671,7 +670,14 @@ fn resolve_session(cli: &Cli, cwd: &str) -> Result<(Option<SessionRef>, Vec<Mess
     });
     let cli_session_id = match cli_session_id {
         Some(Ok(id)) => Some(id),
-        Some(Err(e)) => return Err(e),
+        Some(Err(_)) => {
+            let cli_session_id = cli.session_id.as_deref().unwrap();
+            let storage = StateDir::resolve().context("resolve state dir")?;
+            let mut new_session = StoredSession::new(&model.id, cwd);
+            new_session.save(&storage).context("save new session")?;
+            eprintln!("warning: --session-id '{cli_session_id}' is not a valid Maki session ID; treating as opaque correlation key and creating new session {}", new_session.id);
+            Some(SessionRef::from(new_session.id))
+        }
         None => None,
     };
 

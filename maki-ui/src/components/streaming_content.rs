@@ -1,4 +1,5 @@
 use crate::animation::Typewriter;
+use crate::components::messages::wrapped_line_count;
 use crate::markdown::paint_semantic;
 use crate::theme;
 
@@ -50,6 +51,8 @@ struct StreamingCache {
     hash: u64,
     /// Bytes already folded into `hash`; a shrink (after invalidate) resets it.
     hashed_len: usize,
+    /// Cached rendered height for the current width.
+    rendered_height: Option<(u16, u16)>,
 }
 
 impl Default for StreamingCache {
@@ -59,6 +62,7 @@ impl Default for StreamingCache {
             lines: Vec::new(),
             hash: FNV_OFFSET,
             hashed_len: 0,
+            rendered_height: None,
         }
     }
 }
@@ -87,6 +91,7 @@ impl StreamingCache {
         self.lines.clear();
         self.hash = FNV_OFFSET;
         self.hashed_len = 0;
+        self.rendered_height = None;
     }
 
     /// Returns `true` when the cache was repopulated. The caller passes a
@@ -115,6 +120,7 @@ impl StreamingCache {
         let semantic = renderer.render(text.as_ref(), width, theme_gen);
         self.lines = paint_semantic(&semantic, prefix, text_style, prefix_style);
         self.key = Some(key);
+        self.rendered_height = None;
         true
     }
 }
@@ -182,7 +188,7 @@ impl StreamingContent {
 
     pub fn render_lines(&mut self, width: u16) -> &[Line<'static>] {
         self.typewriter.tick();
-        self.cache.get_or_update(
+        let repopulated = self.cache.get_or_update(
             &mut self.renderer,
             self.typewriter.visible(),
             self.prefix,
@@ -190,11 +196,20 @@ impl StreamingContent {
             self.prefix_style,
             width,
         );
+        if repopulated || self.cache.rendered_height.is_none_or(|(w, _)| w != width) {
+            let height = wrapped_line_count(&self.cache.lines, width);
+            self.cache.rendered_height = Some((width, height));
+        }
         &self.cache.lines
     }
 
     pub fn cached_lines(&self) -> &[Line<'static>] {
         &self.cache.lines
+    }
+
+    pub fn height(&mut self, width: u16) -> u16 {
+        self.render_lines(width);
+        self.cache.rendered_height.map(|(_, h)| h).unwrap_or(0)
     }
 
     #[cfg(test)]
@@ -364,6 +379,7 @@ mod tests {
     #[test]
     fn cache_invalidates_on_width_change() {
         let style = Style::default();
+        let width = 80;
         let mut cache = StreamingCache::default();
         let mut renderer = fresh_renderer();
         let text = "```rust\nfn extremely_long_function_name_that_definitely_will_not_fit(arg_one: &str, arg_two: usize) {}\n```";

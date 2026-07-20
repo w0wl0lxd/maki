@@ -11,13 +11,14 @@ local STRUCTURED_OUTPUT_NAME = "structured_output"
 local STRUCTURED_OUTPUT_DESCRIPTION = "Report your final result. Call it exactly once when your task is complete."
 local STRUCTURED_OUTPUT_ACK = "Output recorded."
 local STRUCTURED_OUTPUT_PROMPT_SUFFIX = "\n\nWhen finished, call the structured_output tool with your final result."
-local MAX_STRUCTURED_RETRIES = 2
+local DONE_NAME = "done"
+local DONE_DESCRIPTION = "Call when the task is complete with your final answer."
+local DONE_PROMPT_SUFFIX = "\n\nWhen finished, call the done tool with your final answer."
 local MAX_SCHEMA_ERRORS = 3
 local SCHEMA_COMPILE_ERROR = "invalid output_schema"
+local SCHEMA_ROOT_ERROR = "output_schema must have type object"
 local STRUCTURED_MISSING_ERROR = "subagent finished without calling structured_output"
 local STRUCTURED_INVALID_ERROR = "subagent result does not match output_schema"
-local NUDGE_MISSING =
-  "You did not call the structured_output tool. Call it now with your final result matching its input schema."
 local INVALID_INPUT_PREFIX =
   "Input does not match the required schema. Fix the errors and call structured_output again:\n"
 local BODY_INDENT_COLS = 4
@@ -96,6 +97,9 @@ local function handler(input, ctx)
   -- Compile early: a bad schema costs zero tokens.
   local validator
   if input.output_schema then
+    if input.output_schema.type ~= "object" then
+      return { llm_output = SCHEMA_ROOT_ERROR, is_error = true }
+    end
     local compile_err
     validator, compile_err = maki.json.schema_validator(input.output_schema)
     if compile_err then
@@ -129,6 +133,7 @@ local function handler(input, ctx)
     return { llm_output = tools_err, is_error = true }
   end
 
+  local sess
   local captured, last_errors
   local local_tools
   if validator then
@@ -143,7 +148,26 @@ local function handler(input, ctx)
             return nil, INVALID_INPUT_PREFIX .. last_errors
           end
           captured = value
+          sess:done(maki.json.encode(value))
           return STRUCTURED_OUTPUT_ACK
+        end,
+      },
+    }
+  else
+    local_tools = {
+      [DONE_NAME] = {
+        description = DONE_DESCRIPTION,
+        input_schema = {
+          type = "object",
+          properties = {
+            answer = { type = "string", description = "Final answer to return to the parent agent." },
+          },
+          required = { "answer" },
+          additionalProperties = false,
+        },
+        handler = function(value)
+          sess:done(value.answer)
+          return "Done."
         end,
       },
     }
@@ -153,7 +177,8 @@ local function handler(input, ctx)
 
   -- pcall so a raised error cannot leak the permit.
   local ok, out = pcall(function()
-    local sess, sess_err = maki.agent.session(ctx, {
+    local sess_err
+    sess, sess_err = maki.agent.session(ctx, {
       model_spec = model.spec,
       system = system,
       tools = tool_defs,
@@ -168,14 +193,11 @@ local function handler(input, ctx)
     local message = input.prompt
     if validator then
       message = message .. STRUCTURED_OUTPUT_PROMPT_SUFFIX
+    else
+      message = message .. DONE_PROMPT_SUFFIX
     end
 
     local result, err = sess:prompt(message)
-    local retries = 0
-    while not err and validator and not captured and retries < MAX_STRUCTURED_RETRIES do
-      retries = retries + 1
-      result, err = sess:prompt(NUDGE_MISSING)
-    end
 
     sess:close()
 

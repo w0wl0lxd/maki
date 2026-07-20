@@ -940,6 +940,7 @@ impl EventPump {
             | AgentEvent::AutoCompacting
             | AgentEvent::CompactionDone
             | AgentEvent::AuthRequired
+            | AgentEvent::SubagentInputRequired { .. }
             | AgentEvent::SubagentHistory { .. }
             | AgentEvent::ToolSnapshot { .. }
             | AgentEvent::ToolHeaderSnapshot { .. }

@@ -36,6 +36,7 @@ use self::error::McpError;
 use self::http::HttpTransport;
 use self::stdio::StdioTransport;
 use self::transport::McpTransport;
+use crate::tools::schema::sanitize_tool_input_schema;
 
 const SEPARATOR: &str = ".";
 const WIRE_SEPARATOR: &str = "__";
@@ -309,6 +310,13 @@ impl McpHandle {
         if let Some(arr) = tools.as_array_mut() {
             arr.extend(self.index.load().descriptors.iter().cloned());
         }
+    }
+
+    /// Number of currently advertised MCP tool descriptors. Cheap to read and
+    /// changes whenever an MCP server finishes its handshake, so it is a
+    /// suitable cache-invalidation signal for derived tool lists.
+    pub fn tool_count(&self) -> usize {
+        self.index.load().descriptors.len()
     }
 
     pub async fn shutdown(&self) {
@@ -640,10 +648,11 @@ fn publish(inner: &McpManagerInner, index: &ArcSwap<ToolIndex>, snapshot: &ArcSw
                         transport: Arc::clone(transport),
                     },
                 );
+                let sanitized_schema = sanitize_tool_input_schema(t.input_schema.clone());
                 descriptors.push(json!({
                     "name": wire_tool_name(&t.qualified_name),
                     "description": t.description,
-                    "input_schema": t.input_schema,
+                    "input_schema": sanitized_schema,
                 }));
             }
             for p in &entry.prompts {

@@ -43,6 +43,10 @@ impl HighlightKey {
 pub(super) struct Segment {
     lines: Vec<Line<'static>>,
     pub search_text: String,
+    pub raw_text: Option<String>,
+    /// Visual width of the prefix added to every rendered line (e.g. "maki> ").
+    /// Used when copying a selection back to the original source text.
+    pub prefix_width: u16,
     pub tool_id: Option<String>,
     /// Backlink to `self.messages`, set only by `with_lines`. A click on a
     /// collapsed thinking indicator has no tool_id to route by, so this is
@@ -77,11 +81,15 @@ impl Segment {
     pub fn with_lines(
         lines: Vec<Line<'static>>,
         search_text: String,
+        raw_text: Option<String>,
+        prefix_width: u16,
         msg_index: Option<usize>,
     ) -> Self {
         Self {
             lines,
             search_text,
+            raw_text,
+            prefix_width,
             msg_index,
             ..Self::default()
         }
@@ -265,8 +273,30 @@ impl SegmentCache {
         self.segments.push(seg);
     }
 
+    pub fn push_spacer_if_needed(&mut self) {
+        if !self.segments.is_empty() {
+            self.segments.push(Segment::spacer());
+        }
+    }
+
     pub fn insert(&mut self, pos: usize, seg: Segment) {
         self.segments.insert(pos, seg);
+    }
+
+    /// Inserts `segs` before the existing segments, shifting every
+    /// `msg_index` backlink by `shift` so it still points at the right
+    /// message after older messages are prepended at the front.
+    pub fn prepend(&mut self, mut segs: Vec<Segment>, shift: usize) {
+        if shift > 0 {
+            for seg in &mut self.segments {
+                if let Some(ref mut idx) = seg.msg_index {
+                    *idx += shift;
+                }
+            }
+        }
+        segs.append(&mut self.segments);
+        self.segments = segs;
+        self.msg_count += shift;
     }
 
     pub fn needs_rebuild(&self, msg_len: usize) -> bool {
@@ -323,12 +353,6 @@ impl SegmentCache {
         self.segments.len()
     }
 
-    pub fn push_spacer_if_needed(&mut self) {
-        if !self.segments.is_empty() {
-            self.segments.push(Segment::spacer());
-        }
-    }
-
     pub fn search_texts(&self) -> Vec<&str> {
         self.segments
             .iter()
@@ -342,7 +366,7 @@ impl SegmentCache {
     }
 }
 
-pub(super) fn wrapped_line_count(lines: &[Line<'_>], width: u16) -> u16 {
+pub(crate) fn wrapped_line_count(lines: &[Line<'_>], width: u16) -> u16 {
     if width == 0 {
         return lines.len() as u16;
     }

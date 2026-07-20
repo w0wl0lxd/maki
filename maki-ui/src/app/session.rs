@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use crate::chat::{Chat, DONE_TEXT, history_to_display};
+use crate::chat::{Chat, DONE_TEXT, RESTORE_BATCH_SIZE, history_to_display};
 use crate::components::DisplayRole;
 use crate::components::rewind_picker::RewindEntry;
 use crate::components::{Action, LoadedSession};
@@ -15,19 +15,20 @@ use super::session_state::{SessionState, stored_to_rules};
 use super::{App, Mode, PendingInput, PlanState};
 use crate::agent::QueuedMessage;
 
+/// The single content predicate: `App::save_session` persists a session
+/// iff this holds, and the shutdown path reuses it to tell which tabs were
+/// saved, so the report and the disk can never disagree. Sync the session
+/// first (`save_session` does).
+pub(crate) fn session_has_content(session: &AppSession) -> bool {
+    !session.messages.is_empty()
+        || session.meta.input_draft.is_some()
+        || !session.meta.queued_messages.is_empty()
+        || session.meta.mode != Some(maki_storage::sessions::StoredMode::Build)
+}
+
 impl App {
-    pub(crate) fn has_messages(&self) -> bool {
-        !self.state.session.messages.is_empty()
-    }
-
-    pub(crate) fn has_ephemeral(&self) -> bool {
-        self.state.session.meta.input_draft.is_some()
-            || !self.state.session.meta.queued_messages.is_empty()
-            || self.state.session.meta.mode != Some(maki_storage::sessions::StoredMode::Build)
-    }
-
     pub(crate) fn has_content(&self) -> bool {
-        self.has_messages() || self.has_ephemeral()
+        session_has_content(&self.state.session)
     }
 
     pub(crate) fn save_session(&mut self) {
@@ -101,7 +102,8 @@ impl App {
             &self.state.session.tool_outputs,
             &self.ui_config.tool_output_lines,
         );
-        self.main_chat().load_messages(display_msgs);
+        self.main_chat()
+            .begin_restore(display_msgs, RESTORE_BATCH_SIZE);
         self.main_chat().token_usage = self.state.token_usage;
         self.main_chat().context_size = self.state.context_size;
         if let Some(draft) = self.state.session.meta.input_draft.take() {
@@ -124,6 +126,7 @@ impl App {
             self.chat_index.insert(sa.tool_use_id.clone(), idx);
             let mut chat = Chat::new(sa.name, self.ui_config);
             chat.set_restore_channel(self.lua_event_handle.clone(), self.restore_event_tx.clone());
+            chat.tool_use_id = Some(sa.tool_use_id.clone());
             chat.model_id = sa.model;
             if let Some(messages) = self.state.session.subagent_messages.get(&sa.tool_use_id) {
                 let (display, items) = history_to_display(
@@ -131,7 +134,7 @@ impl App {
                     &self.state.session.tool_outputs,
                     &self.ui_config.tool_output_lines,
                 );
-                chat.load_messages(display);
+                chat.begin_restore(display, RESTORE_BATCH_SIZE);
                 chat.mark_finished(DisplayRole::Done, DONE_TEXT);
                 self.fire_restore_items(items);
             }

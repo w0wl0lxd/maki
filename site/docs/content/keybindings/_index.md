@@ -30,6 +30,7 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 | `\+Enter` / `Ctrl+J` / `Alt+Enter` | Newline |
 | `Tab` | Toggle mode |
 | `/command` | Open command palette |
+| `@` | Mention a file (Esc leaves a literal @) |
 | `Ctrl+W` | Delete word backward |
 | `Alt+←` / `Alt+→` | Move word left / right |
 | `Ctrl+A` | Jump to start of line |
@@ -37,7 +38,7 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 | `Ctrl+U` / `Ctrl+D` | Scroll half page up / down |
 | `Ctrl+E` | Jump to end of line |
 | `Ctrl+G` | Scroll to top |
-| `Ctrl+B` | Scroll to bottom |
+| `Ctrl+B` | Scroll to bottom and resume auto-scroll |
 | `Ctrl+Q` | Pop queue |
 | `Esc Esc` | Rewind |
 | `Alt+O` | Edit input in external editor |

@@ -15,7 +15,7 @@ use maki_agent::{
 use maki_config::{PermissionsConfig, UiConfig};
 use maki_lua::{HintReader, KeymapReader, LuaCommandReader};
 use maki_providers::{ContentBlock, Effort, Role, TokenUsage};
-use maki_storage::sessions::StoredThinking;
+use maki_storage::sessions::{StoredMode, StoredThinking};
 use ratatui::layout::Rect;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -26,7 +26,11 @@ use test_case::test_case;
 const WRITER_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn set_zone(app: &mut App, zone: SelectionZone, area: Rect) {
-    app.zones.push(SelectableZone { area, zone });
+    app.zones.push(SelectableZone {
+        area,
+        zone,
+        scroll_info: None,
+    });
 }
 
 fn build_app(dir: StateDir, writer: Arc<StorageWriter>) -> App {
@@ -107,6 +111,7 @@ fn subagent_info_with_tx(
         prompt: None,
         model: None,
         answer_tx,
+        prompt_tx: None,
     }
 }
 
@@ -898,6 +903,38 @@ fn overlay_blocks_ctrl_shortcuts(setup: fn(&mut App)) {
 }
 
 #[test]
+fn at_mention_opens_file_picker_and_esc_leaves_literal() {
+    let mut app = test_app();
+    app.update(Msg::Key(key(KeyCode::Char('@'))));
+    assert!(app.file_picker.is_open());
+    assert_eq!(app.input_box.buffer.value(), "");
+
+    app.update(Msg::Key(key(KeyCode::Esc)));
+    assert!(!app.file_picker.is_open());
+    assert_eq!(app.input_box.buffer.value(), "@");
+}
+
+#[test]
+fn at_mention_does_not_open_mid_word() {
+    let mut app = test_app();
+    for c in "em".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    app.update(Msg::Key(key(KeyCode::Char('@'))));
+    assert!(!app.file_picker.is_open());
+    assert_eq!(app.input_box.buffer.value(), "em@");
+}
+
+#[test]
+fn ctrl_s_file_picker_unaffected_by_at_mention_flag() {
+    let mut app = test_app();
+    app.update(Msg::Key(key(KeyCode::Char('x'))));
+    app.update(Msg::Key(kb::FILE_PICKER.to_key_event()));
+    assert!(app.file_picker.is_open());
+    assert_eq!(app.input_box.buffer.value(), "x");
+}
+
+#[test]
 fn compact_command_sets_streaming() {
     let mut app = test_app();
     let actions = app.execute_command(cmd("/compact"));
@@ -995,7 +1032,7 @@ fn mouse_drag_clamps_to_area() {
 
     let state = app.selection_state.as_ref().unwrap();
     let (_, end) = state.sel().normalized();
-    assert_eq!(end.col, 79);
+    assert_eq!(end.col, 78);
     assert_eq!(end.row, 19, "clamped to area bottom");
     assert!(
         app.selection_state.as_ref().unwrap().is_edge_scrolling(),
@@ -1159,8 +1196,7 @@ fn send_scroll(app: &mut App) {
     });
 }
 
-#[test_case(send_key as fn(&mut App)    ; "key")]
-#[test_case(send_scroll as fn(&mut App) ; "scroll")]
+#[test_case(send_key as fn(&mut App) ; "key")]
 fn interrupt_clears_dragging_but_preserves_pending_copy(interrupt: fn(&mut App)) {
     let mut app = test_app();
     set_zone(&mut app, SelectionZone::Messages, Rect::new(0, 0, 80, 20));
@@ -1173,6 +1209,30 @@ fn interrupt_clears_dragging_but_preserves_pending_copy(interrupt: fn(&mut App))
     assert!(
         app.selection_state.as_ref().unwrap().is_pending_copy(),
         "preserves pending copy"
+    );
+}
+
+#[test]
+fn scroll_preserves_dragging_and_updates_cursor() {
+    let mut app = test_app();
+    set_zone(&mut app, SelectionZone::Messages, Rect::new(0, 0, 80, 20));
+    app.update(mouse_event(MouseEventKind::Down(MouseButton::Left), 5, 5));
+
+    send_scroll(&mut app);
+
+    assert!(
+        matches!(
+            app.selection_state.as_ref().unwrap(),
+            SelectionState::Dragging { .. }
+        ),
+        "scroll keeps dragging"
+    );
+
+    make_pending_copy(&mut app);
+    send_scroll(&mut app);
+    assert!(
+        app.selection_state.as_ref().unwrap().is_pending_copy(),
+        "scroll preserves pending copy"
     );
 }
 
@@ -1539,17 +1599,54 @@ fn submit_exit_quits() {
 }
 
 #[test]
-fn persisted_tab_none_for_empty_some_for_content() {
+fn session_has_content_covers_each_branch() {
+    let mut session = AppSession::new("test-model", "/tmp/test");
+    assert!(!session_has_content(&session));
+
+    session.meta.input_draft = Some("draft".into());
+    assert!(session_has_content(&session));
+    session.meta.input_draft = None;
+
+    session.meta.queued_messages = vec!["queued".into()];
+    assert!(session_has_content(&session));
+    session.meta.queued_messages.clear();
+
+    session.meta.mode = Some(StoredMode::Plan);
+    assert!(session_has_content(&session));
+    session.meta.mode = Some(StoredMode::Build);
+
+    session.messages.push(Message::user("hello".into()));
+    assert!(session_has_content(&session));
+}
+
+#[test]
+fn save_session_syncs_ephemeral_content_into_meta() {
     let mut app = test_app();
     app.save_session();
-    assert_eq!(crate::event_loop::persisted_tab(&app), None);
+    assert!(!session_has_content(&app.state.session));
 
     app.update(Msg::Key(key(KeyCode::Char('x'))));
     app.save_session();
-    assert_eq!(
-        crate::event_loop::persisted_tab(&app),
-        Some(app.state.session.id)
-    );
+    assert!(session_has_content(&app.state.session));
+
+    app.update(Msg::Key(key(KeyCode::Backspace)));
+    app.save_session();
+    assert!(app.state.session.meta.input_draft.is_none());
+    assert!(!session_has_content(&app.state.session));
+
+    app.update(Msg::Key(key(KeyCode::Tab)));
+    app.save_session();
+    assert_eq!(app.state.session.meta.mode, Some(StoredMode::Plan));
+    assert!(session_has_content(&app.state.session));
+
+    let mut queued = app_with_queued_message();
+    queued.save_session();
+    let session = &queued.state.session;
+    assert!(session.messages.is_empty());
+    assert!(session.meta.input_draft.is_none());
+    assert_eq!(session.meta.mode, Some(StoredMode::Build));
+    assert_eq!(session.meta.queued_messages, vec!["queued".to_string()]);
+    assert!(session_has_content(session));
 }
 
 fn drain_writer(app: App, writer: Arc<StorageWriter>) {
@@ -2825,6 +2922,24 @@ fn agent_error_creates_synthetic_tool_done_with_message() {
         text.contains(error_msg),
         "tool output should contain error: {text}"
     );
+}
+
+#[test]
+fn error_event_adds_copyable_message_to_main_chat() {
+    let mut app = test_app();
+    app.run_id = 1;
+    app.status = Status::Streaming;
+
+    let error_msg = "Provider is overloaded";
+    app.update(agent_msg(AgentEvent::Error {
+        message: error_msg.into(),
+    }));
+
+    assert_eq!(
+        app.main_chat().last_message_role(),
+        Some(&DisplayRole::Error)
+    );
+    assert!(app.main_chat().last_message_text().contains(error_msg));
 }
 
 #[test]

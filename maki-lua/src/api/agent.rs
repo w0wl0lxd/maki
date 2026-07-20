@@ -833,6 +833,9 @@ async fn prompt(
         let prompt_rx = Arc::clone(&s.prompt_rx);
         let event_tx = s.sub_event_tx.clone();
         let child_cancel = s.child_cancel.clone();
+        let start = s.start;
+        let total_input = Arc::clone(&s.total_input);
+        let total_output = Arc::clone(&s.total_output);
         drop(guard);
 
         let _ = event_tx.send(AgentEvent::SubagentInputRequired { tool_use_id: ui_id });
@@ -846,7 +849,20 @@ async fn prompt(
         };
 
         current_message = match select(pin!(recv_future), pin!(cancel_future)).await {
-            Either::Left((Ok(msg), _)) => msg,
+            Either::Left((Ok(msg), _)) => {
+                if msg.is_empty() {
+                    let guard = inner.lock().await;
+                    let text = last_assistant_text(&guard.history);
+                    let tbl = lua.create_table()?;
+                    tbl.set("text", text)?;
+                    tbl.set("duration_ms", start.elapsed().as_millis() as u64)?;
+                    tbl.set("input_tokens", total_input.load(Ordering::Relaxed))?;
+                    tbl.set("output_tokens", total_output.load(Ordering::Relaxed))?;
+                    drop(guard);
+                    return Ok((Some(tbl), None));
+                }
+                msg
+            }
             Either::Left((Err(e), _)) => return Ok((None, Some(e.to_owned()))),
             Either::Right((_, _)) => return Ok((None, Some("cancelled".to_owned()))),
         };

@@ -8,7 +8,7 @@
 //! agent event, or keypress arrives instead of sleeping in `event::poll`.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arc_swap::{ArcSwap, ArcSwapOption};
 use color_eyre::Result;
@@ -40,7 +40,7 @@ use crate::app::shell::{ShellEvent, spawn_shell};
 use crate::app::{App, Msg, QueuedMessage, SubmitOutcome};
 use crate::components::input::Submission;
 use crate::components::usage_modal::UsageFetchState;
-use crate::components::{Action, ExitRequest, Status};
+use crate::components::{Action, DisplayMessage, DisplayRole, ExitRequest, Status};
 use crate::input::InputReader;
 
 use crate::storage_writer::StorageWriter;
@@ -48,17 +48,18 @@ use crate::terminal;
 
 const ANIMATION_INTERVAL_MS: u64 = 16;
 const IDLE_POLL_INTERVAL_MS: u64 = 100;
+const PERIODIC_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 /// Max events handled per frame so a flood cannot starve rendering.
 const DRAIN_BUDGET: usize = 256;
 const AGENT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const DELETE_FOCUSED_ERR: &str = "cannot delete the focused session";
 const NOT_LIVE_ERR: &str = "session not live";
 
-/// Per-tab persistence outcome after `shutdown`: `Some` iff the tab had
-/// content and was saved; `None` means a deliberately unpersisted empty tab.
+/// Tabs carry their in-memory sessions so `/reload` reopens them without a
+/// disk round-trip; `session_has_content` tells which ones were saved.
 pub(crate) struct ShutdownReport {
     pub exit: ExitRequest,
-    pub tabs: Vec<Option<MakiId>>,
+    pub tabs: Vec<AppSession>,
     pub focused: usize,
 }
 
@@ -207,7 +208,12 @@ pub(crate) struct EventLoop<'t> {
     warn_rx: flume::Receiver<String>,
     warn_tx: flume::Sender<String>,
     ui_action_rx: Option<flume::Receiver<UiAction>>,
+    last_save: Instant,
     _model_fetch_task: smol::Task<()>,
+    /// Set when UI state changed and a fresh frame must be painted. Draws are
+    /// gated on this (or active animation) so we don't re-diff the whole
+    /// buffer on every idle tick. Resize also sets it.
+    dirty: bool,
 }
 
 /// One item from any of the event loop's sources; `None` from `next_wake`
@@ -400,7 +406,9 @@ impl<'t> EventLoop<'t> {
             warn_rx: bg.warn_rx,
             warn_tx: bg.warn_tx,
             ui_action_rx,
+            last_save: Instant::now(),
             _model_fetch_task: bg.task,
+            dirty: true,
         })
     }
 
@@ -422,9 +430,13 @@ impl<'t> EventLoop<'t> {
             if let Err(e) = self.drain_channels() {
                 break Err(e);
             }
+            let should_draw = self.dirty || self.sessions[self.focused].app.is_animating();
             let app = &mut self.sessions[self.focused].app;
-            if let Err(e) = self.terminal.draw(|f| app.view(f)) {
-                break Err(e.into());
+            if should_draw {
+                if let Err(e) = self.terminal.draw(|f| app.view(f)) {
+                    break Err(e.into());
+                }
+                self.dirty = false;
             }
 
             if let Some(i) = self
@@ -485,6 +497,7 @@ impl<'t> EventLoop<'t> {
     }
 
     fn handle_wake(&mut self, wake: Wake) -> Result<()> {
+        self.dirty = true;
         match wake {
             Wake::Input(ev) => self.handle_input(ev),
             Wake::InputGone => return Err(eyre!("terminal input reader stopped")),
@@ -509,6 +522,19 @@ impl<'t> EventLoop<'t> {
             rt.app.status_bar.poll_branch_update();
             rt.app.mcp_picker.refresh();
         }
+        self.tick_periodic_save();
+    }
+
+    fn tick_periodic_save(&mut self) {
+        if self.last_save.elapsed() < PERIODIC_SAVE_INTERVAL {
+            return;
+        }
+        let app = &mut self.sessions[self.focused].app;
+        if app.status != Status::Streaming || !app.has_content() {
+            return;
+        }
+        app.save_session();
+        self.last_save = Instant::now();
     }
 
     fn handle_agent(&mut self, idx: usize, envelope: Box<maki_agent::Envelope>) {
@@ -528,6 +554,7 @@ impl<'t> EventLoop<'t> {
         for rt in &mut self.sessions {
             if rt.app.status == Status::Streaming && rt.handles.agent_rx.is_disconnected() {
                 rt.app.status = Status::error("agent stopped unexpectedly".into());
+                self.dirty = true;
             }
         }
 
@@ -536,6 +563,7 @@ impl<'t> EventLoop<'t> {
         for rt in &mut self.sessions {
             if rt.app.state.session.model != spec {
                 rt.app.update_model(&slot_model.model);
+                self.dirty = true;
             }
         }
         drop(slot_model);
@@ -814,6 +842,10 @@ impl<'t> EventLoop<'t> {
 
     fn translate(&mut self, raw: Event) -> (Option<Msg>, Option<Event>) {
         match raw {
+            Event::Resize(..) => {
+                self.dirty = true;
+                (None, None)
+            }
             Event::Key(key) if key.kind == KeyEventKind::Press => (Some(Msg::Key(key)), None),
             Event::Key(_) => (None, None),
             Event::Paste(text) => (Some(Msg::Paste(text)), None),
@@ -1036,11 +1068,21 @@ impl<'t> EventLoop<'t> {
                         provider: Arc::from(new_provider),
                     }));
                 }
-                Err(e) => self
-                    .focused_app()
-                    .flash(format!("Failed to create provider: {e}")),
+                Err(e) => {
+                    let msg = format!("Failed to create provider: {e}");
+                    self.focused_app()
+                        .main_chat()
+                        .push(DisplayMessage::new(DisplayRole::Error, msg.clone()));
+                    self.focused_app().flash(msg);
+                }
             },
-            Err(e) => self.focused_app().flash(format!("Invalid model: {e}")),
+            Err(e) => {
+                let msg = format!("Invalid model: {e}");
+                self.focused_app()
+                    .main_chat()
+                    .push(DisplayMessage::new(DisplayRole::Error, msg.clone()));
+                self.focused_app().flash(msg);
+            }
         }
     }
 
@@ -1095,15 +1137,18 @@ impl<'t> EventLoop<'t> {
             let _ = rt.handles.cmd_tx.try_send(AgentCommand::CancelAll);
         }
         let mut tabs = Vec::with_capacity(self.sessions.len());
+        let mut agent_tasks = Vec::with_capacity(self.sessions.len());
         for rt in self.sessions.drain(..) {
             let SessionRuntime {
                 mut app, handles, ..
             } = rt;
             app.save_session();
-            tabs.push(persisted_tab(&app));
-            drop(app);
-            handles.shutdown(AGENT_SHUTDOWN_TIMEOUT);
+            // `app` drops at the end of this iteration, closing the
+            // channels the agent loop waits on, so `join_all` can finish.
+            tabs.push(app.state.session);
+            agent_tasks.push(handles.into_task());
         }
+        crate::agent::join_all(agent_tasks, AGENT_SHUTDOWN_TIMEOUT);
         if let Some(ref h) = self.ctx.mcp_handle {
             smol::block_on(h.shutdown());
         }
@@ -1119,12 +1164,6 @@ impl<'t> EventLoop<'t> {
             focused: self.focused,
         }
     }
-}
-
-/// Uses the same `has_content` check as `App::save_session`, so the report
-/// and the disk can never disagree about which tabs were saved.
-pub(crate) fn persisted_tab(app: &App) -> Option<MakiId> {
-    app.has_content().then_some(app.state.session.id)
 }
 
 fn scroll_delta(kind: MouseEventKind, lines: u32) -> i32 {

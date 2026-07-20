@@ -15,7 +15,7 @@ use crate::theme;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -63,6 +63,7 @@ pub struct ListPicker<T> {
     title: String,
     max_visible: Option<u16>,
     footer: Option<fn() -> Line<'static>>,
+    footer_hints: Option<&'static [(&'static str, &'static str)]>,
     error_text: Option<String>,
 }
 
@@ -231,6 +232,7 @@ impl<T: PickerItem> ListPicker<T> {
             title: String::new(),
             max_visible: None,
             footer: None,
+            footer_hints: None,
             error_text: None,
         }
     }
@@ -243,6 +245,10 @@ impl<T: PickerItem> ListPicker<T> {
     pub fn with_footer_builder(mut self, builder: fn() -> Line<'static>) -> Self {
         self.footer = Some(builder);
         self
+    }
+
+    pub fn set_footer(&mut self, hints: &'static [(&'static str, &'static str)]) {
+        self.footer_hints = Some(hints);
     }
 
     pub fn open_toggleable(&mut self, items: Vec<T>, enabled: Vec<bool>, title: impl Into<String>) {
@@ -441,7 +447,6 @@ impl<T: PickerItem> ListPicker<T> {
     }
 
     pub fn view(&mut self, frame: &mut Frame, area: Rect) -> Rect {
-        let footer = self.footer;
         match self.state.as_mut() {
             None => Rect::default(),
             Some(s) => render_ready(
@@ -450,7 +455,8 @@ impl<T: PickerItem> ListPicker<T> {
                 s,
                 &self.title,
                 self.max_visible,
-                footer,
+                self.footer,
+                self.footer_hints,
                 self.error_text.as_deref(),
             ),
         }
@@ -467,6 +473,7 @@ impl<T: PickerItem> Overlay for ListPicker<T> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_ready<T: PickerItem>(
     frame: &mut Frame,
     area: Rect,
@@ -474,9 +481,14 @@ fn render_ready<T: PickerItem>(
     title: &str,
     max_visible: Option<u16>,
     footer: Option<fn() -> Line<'static>>,
+    footer_hints: Option<&'static [(&'static str, &'static str)]>,
     error_text: Option<&str>,
 ) -> Rect {
-    let footer_rows = if footer.is_some() { 1u16 } else { 0 };
+    let footer_rows = if footer.is_some() || footer_hints.is_some() {
+        1u16
+    } else {
+        0
+    };
     let content_rows = if s.filtered.is_empty() {
         1
     } else {
@@ -510,7 +522,7 @@ fn render_ready<T: PickerItem>(
     }
     constraints.push(Constraint::Min(1)); // list
     constraints.push(Constraint::Length(1)); // search
-    if footer.is_some() {
+    if footer.is_some() || footer_hints.is_some() {
         constraints.push(Constraint::Length(1));
     }
 
@@ -546,12 +558,31 @@ fn render_ready<T: PickerItem>(
 
     if let Some(build) = footer {
         frame.render_widget(Paragraph::new(build()), areas[area_idx]);
+    } else if let Some(hints) = footer_hints {
+        let pairs: Vec<Span<'static>> = hints
+            .iter()
+            .flat_map(|(key, val)| {
+                [
+                    Span::styled(*key, Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" "),
+                    Span::raw(*val),
+                    Span::raw("  "),
+                ]
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(Line::from(pairs)), areas[area_idx]);
     }
 
     let total_visual = visual_rows_in_range(&s.filtered, &s.items, 0, s.filtered.len());
     if total_visual as u16 > viewport_h {
         let visual_offset = visual_rows_in_range(&s.filtered, &s.items, 0, s.scroll_offset);
-        render_vertical_scrollbar(frame, list_area, total_visual as u16, visual_offset as u16);
+        render_vertical_scrollbar(
+            frame,
+            list_area,
+            total_visual as u16,
+            visual_offset as u16,
+            None,
+        );
     }
 
     s.inner_area = inner;
@@ -783,6 +814,8 @@ mod tests {
     use crate::components::key;
     use crate::components::keybindings::key as kb;
     use crossterm::event::KeyCode;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use test_case::test_case;
 
     fn ready_state<T>(p: &ListPicker<T>) -> &State<T> {
@@ -818,6 +851,20 @@ mod tests {
 
     fn entries(names: &[&str]) -> Vec<Entry> {
         names.iter().map(|n| Entry::new(n)).collect()
+    }
+
+    #[test]
+    fn footer_hints_render_without_panicking() {
+        let mut picker = ListPicker::new();
+        picker.set_footer(&[("Enter", "open"), ("Esc", "close")]);
+        picker.open(entries(&["Main", "Task"]), " Tasks ");
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).expect("terminal");
+
+        terminal
+            .draw(|frame| {
+                picker.view(frame, frame.area());
+            })
+            .expect("render");
     }
 
     #[test]

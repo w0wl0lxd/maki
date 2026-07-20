@@ -48,6 +48,11 @@ pub(super) struct AgentLoop {
     lua_handle: Option<EventHandle>,
     subagent_cancels: Arc<CancelMap<String>>,
     tools_cache: Option<ToolsCache>,
+    /// Cache of the built tool definitions so we don't re-run every tool's
+    /// `description()` (which for Lua describe-fns is a cross-thread
+    /// round-trip) and re-serialize the JSON on every agent run. Invalidated
+    /// when anything that affects the definitions changes.
+    cached_tools: Value,
 }
 
 struct ToolsCache {
@@ -58,6 +63,7 @@ struct ToolsCache {
     supports_vision: bool,
     workflow: bool,
     vars_hash: u64,
+}
 }
 
 impl AgentLoop {
@@ -104,6 +110,7 @@ impl AgentLoop {
             lua_handle,
             subagent_cancels,
             tools_cache: None,
+            cached_tools: Value::Null,
         }
     }
 
@@ -311,7 +318,7 @@ impl AgentLoop {
         });
     }
 
-    fn build_tools(&self, model: &Model, workflow: bool) -> Value {
+    fn build_tools(&mut self, model: &Model, workflow: bool) -> Value {
         let examples = model.supports_tool_examples();
         let filter = ToolFilter::from_config(&self.config, model, &[]);
         let ctx = DescriptionContext {
@@ -319,7 +326,9 @@ impl AgentLoop {
             audience: ToolAudience::MAIN,
             workflow,
         };
-        ToolRegistry::global().definitions(&self.vars, &ctx, examples)
+        let tools = ToolRegistry::global().definitions(&self.vars, &ctx, examples);
+        self.cached_tools = tools.clone();
+        tools
     }
 
     async fn reload_instructions(&mut self) {

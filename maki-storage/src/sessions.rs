@@ -1270,7 +1270,9 @@ where
 
     pub fn migrate_to_jsonl(dir: &Path, session: &Self) -> Result<SessionLog, SessionError> {
         let log = SessionLog::create(dir, session)?;
-        remove_legacy_files(dir, session.id)?;
+        if let Err(e) = remove_legacy_files(dir, session.id) {
+            warn!(error = %e, "failed to remove legacy files after migration");
+        }
         Ok(log)
     }
 }

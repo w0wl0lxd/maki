@@ -43,10 +43,7 @@ impl Vars {
     /// cache key so cached templated output is invalidated when any var changes.
     pub fn content_hash(&self) -> u64 {
         let mut h = DefaultHasher::new();
-        for (k, v) in &self.0 {
-            k.hash(&mut h);
-            v.hash(&mut h);
-        }
+        self.0.hash(&mut h);
         h.finish()
     }
 }

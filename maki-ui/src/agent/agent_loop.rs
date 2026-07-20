@@ -54,6 +54,8 @@ struct ToolsCache {
     snap: Arc<Vec<RegisteredTool>>,
     mcp_gen: Option<u64>,
     model_id: String,
+    supports_tool_examples: bool,
+    supports_vision: bool,
     workflow: bool,
     vars_hash: u64,
 }
@@ -154,8 +156,9 @@ impl AgentLoop {
         self.publish_btw_system(&maki_agent::prompt::ResolvedSlots::default());
 
         let slot = self.model_slot.load();
-        self.rebuild_tools(&slot.model, false);
+        self.tools = self.build_tools(&slot.model, false);
         if let Some(ref mcp) = self.mcp_handle {
+            mcp.extend_tools(&mut self.tools);
             spawn_oauth_for_needs_auth(mcp);
         }
         !self.init_cancel.is_cancelled()
@@ -279,10 +282,14 @@ impl AgentLoop {
             .as_ref()
             .map(|m| m.reader().load().generation);
         let vars_hash = self.vars.content_hash();
+        let supports_tool_examples = model.supports_tool_examples();
+        let supports_vision = model.supports_vision();
         if let Some(ref cache) = self.tools_cache
             && Arc::ptr_eq(&cache.snap, &snap)
             && cache.mcp_gen == mcp_gen
             && cache.model_id == model.id
+            && cache.supports_tool_examples == supports_tool_examples
+            && cache.supports_vision == supports_vision
             && cache.workflow == workflow
             && cache.vars_hash == vars_hash
         {
@@ -297,6 +304,8 @@ impl AgentLoop {
             snap,
             mcp_gen,
             model_id: model.id.clone(),
+            supports_tool_examples,
+            supports_vision,
             workflow,
             vars_hash,
         });

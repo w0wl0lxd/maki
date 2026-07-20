@@ -898,22 +898,19 @@ impl App {
     }
 
     pub(crate) fn handle_submit(&mut self, sub: Submission) -> Vec<Action> {
-        match &mut self.pending_input {
+        match std::mem::take(&mut self.pending_input) {
             PendingInput::AuthRetry { subagent_id } => {
-                let id = subagent_id.clone();
-                self.pending_input = PendingInput::None;
-                self.send_to_agent(id.as_deref(), String::new());
+                self.send_to_agent(subagent_id.as_deref(), String::new());
                 return vec![];
             }
-            PendingInput::SubagentFollowUp { queue } => {
+            PendingInput::SubagentFollowUp { mut queue } => {
                 if let Some(subagent_id) = queue.pop_front() {
-                    self.send_subagent_prompt(&subagent_id, sub.text);
-                    if queue.is_empty() {
-                        self.pending_input = PendingInput::None;
+                    if !queue.is_empty() {
+                        self.pending_input = PendingInput::SubagentFollowUp { queue };
                     }
+                    self.send_subagent_prompt(&subagent_id, sub.text);
                     return vec![];
                 }
-                self.pending_input = PendingInput::None;
             }
             PendingInput::None => {}
         }

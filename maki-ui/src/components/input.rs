@@ -1,5 +1,3 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::shell::parse_shell_prefix;
@@ -7,7 +5,7 @@ use crate::highlight;
 use crate::text_buffer::{EditResult, TextBuffer, is_newline_key};
 use crate::theme;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use maki_storage::input_history::InputHistory;
 use std::mem;
 
@@ -18,7 +16,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
-use super::scrollbar::render_vertical_scrollbar;
+use super::scrollbar::{ScrollInfo, render_vertical_scrollbar};
 use super::{apply_scroll_delta, visual_line_count};
 use crate::selection::LineBreaks;
 
@@ -45,6 +43,7 @@ const PLACEHOLDER_SUGGESTIONS: &[&str] = &[
 pub enum InputAction {
     Submit(Submission),
     ContinueLine,
+    OpenFilePicker,
     PaletteSync(String),
     Passthrough(KeyEvent),
     None,
@@ -76,7 +75,11 @@ pub struct InputBox {
     scroll_y: u16,
     follow_cursor: bool,
     placeholder_hint: &'static str,
+    placeholder_index: usize,
     pending_images: Vec<ImageSource>,
+    max_input_lines: u16,
+    last_total_vl: u16,
+    last_content_height: u16,
 }
 
 impl InputBox {
@@ -93,6 +96,14 @@ impl InputBox {
                 return InputAction::None;
             }
             KeyCode::Tab | KeyCode::Esc => return InputAction::Passthrough(key),
+            KeyCode::Char('@')
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    && self.char_before_cursor_is_whitespace_or_start() =>
+            {
+                return InputAction::OpenFilePicker;
+            }
             _ if is_newline_key(&key) => {
                 self.buffer.add_line();
                 return InputAction::ContinueLine;
@@ -164,9 +175,17 @@ impl InputBox {
             draft: String::new(),
             scroll_y: 0,
             follow_cursor: true,
-            placeholder_hint: random_placeholder_hint(),
+            placeholder_hint: PLACEHOLDER_SUGGESTIONS[0],
+            placeholder_index: 0,
             pending_images: Vec::new(),
+            max_input_lines: MAX_INPUT_LINES,
+            last_total_vl: 1,
+            last_content_height: 1,
         }
+    }
+
+    pub fn set_max_input_lines(&mut self, max: u32) {
+        self.max_input_lines = max.clamp(1, u16::MAX as u32 - 2) as u16;
     }
 
     pub fn copy_text(&self) -> String {
@@ -198,7 +217,8 @@ impl InputBox {
         if !self.pending_images.is_empty() {
             visual_lines += 1;
         }
-        (visual_lines as u16).min(MAX_INPUT_LINES) + 2
+        let capped = visual_lines.min(self.max_input_lines as usize);
+        (capped + 2) as u16
     }
 
     pub fn is_at_first_line(&self) -> bool {
@@ -209,14 +229,25 @@ impl InputBox {
         self.buffer.y() == self.buffer.line_count().saturating_sub(1)
     }
 
-    pub fn char_before_cursor_is_backslash(&self) -> bool {
-        let line = &self.buffer.lines()[self.buffer.y()];
+    fn char_before_cursor(&self) -> Option<char> {
         let x = self.buffer.x();
         if x == 0 {
-            return false;
+            return None;
         }
+        let line = &self.buffer.lines()[self.buffer.y()];
         let byte_idx = TextBuffer::char_to_byte(line, x - 1);
-        line.as_bytes()[byte_idx] == b'\\'
+        line[byte_idx..].chars().next()
+    }
+
+    pub fn char_before_cursor_is_backslash(&self) -> bool {
+        self.char_before_cursor() == Some('\\')
+    }
+
+    fn char_before_cursor_is_whitespace_or_start(&self) -> bool {
+        match self.char_before_cursor() {
+            None => true,
+            Some(c) => c.is_whitespace(),
+        }
     }
 
     pub fn continue_line(&mut self) {
@@ -241,6 +272,8 @@ impl InputBox {
         self.draft.clear();
         self.buffer.clear();
         self.scroll_y = 0;
+        self.placeholder_index = (self.placeholder_index + 1) % PLACEHOLDER_SUGGESTIONS.len();
+        self.placeholder_hint = PLACEHOLDER_SUGGESTIONS[self.placeholder_index];
     }
 
     pub fn is_empty(&self) -> bool {
@@ -337,6 +370,8 @@ impl InputBox {
         }
         let max_scroll = total_vl.saturating_sub(content_height);
         self.scroll_y = self.scroll_y.min(max_scroll);
+        self.last_total_vl = total_vl;
+        self.last_content_height = content_height.max(1);
 
         let is_empty = self.buffer.value().is_empty();
         let mut styled_lines: Vec<Line> = if is_empty && self.pending_images.is_empty() {
@@ -421,7 +456,7 @@ impl InputBox {
 
         if max_scroll > 0 {
             let inner = area.inner(ratatui::layout::Margin::new(0, 1));
-            render_vertical_scrollbar(frame, inner, total_vl, self.scroll_y);
+            render_vertical_scrollbar(frame, inner, total_vl, self.scroll_y, None);
         }
     }
 
@@ -429,22 +464,34 @@ impl InputBox {
         self.scroll_y
     }
 
+    pub fn scroll_info(&self, area: Rect) -> Option<ScrollInfo> {
+        if self.last_total_vl > area.height {
+            let max_scroll = self.last_total_vl.saturating_sub(area.height);
+            Some(ScrollInfo {
+                content_len: self.last_total_vl,
+                position: self.scroll_y.min(max_scroll),
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn set_scroll_y(&mut self, y: u16) {
+        self.scroll_y = y;
+        self.follow_cursor = false;
+    }
+
     pub fn history(&self) -> &InputHistory {
         &self.history
     }
 
     pub fn scroll(&mut self, delta: i32) {
-        self.scroll_y = apply_scroll_delta(self.scroll_y, delta);
+        let max_scroll = self
+            .last_total_vl
+            .saturating_sub(self.last_content_height.max(1));
+        self.scroll_y = apply_scroll_delta(self.scroll_y, delta).min(max_scroll);
         self.follow_cursor = false;
     }
-}
-
-fn random_placeholder_hint() -> &'static str {
-    let idx = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as usize % PLACEHOLDER_SUGGESTIONS.len())
-        .unwrap_or(0);
-    PLACEHOLDER_SUGGESTIONS[idx]
 }
 
 fn effective_width(content_width: usize) -> usize {
@@ -670,6 +717,16 @@ mod tests {
         }
         assert!(input.height(TEST_WIDTH) > base);
         assert!(input.height(TEST_WIDTH) <= MAX_INPUT_LINES + 2);
+    }
+
+    #[test]
+    fn height_respects_configured_max() {
+        let mut input = InputBox::new(InputHistory::default());
+        input.set_max_input_lines(3);
+        for _ in 0..10 {
+            input.buffer.add_line();
+        }
+        assert_eq!(input.height(TEST_WIDTH), 3 + 2);
     }
 
     #[test]
@@ -924,6 +981,19 @@ mod tests {
         assert!(row.starts_with(CHEVRON), "placeholder row: {row:?}");
     }
 
+    #[test]
+    fn placeholder_rotates_on_discard() {
+        let mut input = InputBox::new(InputHistory::default());
+        let first = input.placeholder_hint;
+        for i in 1..=PLACEHOLDER_SUGGESTIONS.len() {
+            input.discard();
+            if i < PLACEHOLDER_SUGGESTIONS.len() {
+                assert_ne!(input.placeholder_hint, first);
+            }
+        }
+        assert_eq!(input.placeholder_hint, first);
+    }
+
     fn test_image() -> ImageSource {
         use maki_providers::ImageMediaType;
         use std::sync::Arc;
@@ -1041,5 +1111,62 @@ mod tests {
         type_text(&mut input, "read");
         input.handle_paste_with_spaces("file.rs");
         assert_eq!(input.buffer.value(), "read file.rs");
+    }
+
+    fn key_char(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn at_mention_opens_picker_at_start() {
+        let mut input = InputBox::new(InputHistory::default());
+        let action = input.handle_key(key_char('@'));
+        assert!(matches!(action, InputAction::OpenFilePicker));
+        assert_eq!(input.buffer.value(), "");
+    }
+
+    #[test]
+    fn at_mention_opens_picker_after_whitespace() {
+        let mut input = InputBox::new(InputHistory::default());
+        type_text(&mut input, "read ");
+        let action = input.handle_key(key_char('@'));
+        assert!(matches!(action, InputAction::OpenFilePicker));
+        assert_eq!(input.buffer.value(), "read ");
+    }
+
+    #[test]
+    fn at_mention_opens_picker_at_new_line_start() {
+        let mut input = InputBox::new(InputHistory::default());
+        type_text(&mut input, "read");
+        input.buffer.add_line();
+        let action = input.handle_key(key_char('@'));
+        assert!(matches!(action, InputAction::OpenFilePicker));
+        assert_eq!(input.buffer.value(), "read\n");
+    }
+
+    #[test]
+    fn at_mention_is_literal_mid_word() {
+        let mut input = InputBox::new(InputHistory::default());
+        type_text(&mut input, "em");
+        let action = input.handle_key(key_char('@'));
+        assert!(!matches!(action, InputAction::OpenFilePicker));
+        assert_eq!(input.buffer.value(), "em@");
+    }
+
+    #[test]
+    fn at_mention_is_literal_after_punctuation() {
+        let mut input = InputBox::new(InputHistory::default());
+        type_text(&mut input, "see(");
+        let action = input.handle_key(key_char('@'));
+        assert!(!matches!(action, InputAction::OpenFilePicker));
+        assert_eq!(input.buffer.value(), "see(@");
+    }
+
+    #[test]
+    fn at_mention_is_literal_with_ctrl_modifier() {
+        let mut input = InputBox::new(InputHistory::default());
+        let action = input.handle_key(KeyEvent::new(KeyCode::Char('@'), KeyModifiers::CONTROL));
+        assert!(!matches!(action, InputAction::OpenFilePicker));
+        assert_eq!(input.buffer.value(), "");
     }
 }

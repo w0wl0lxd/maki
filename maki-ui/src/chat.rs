@@ -1,14 +1,14 @@
 //! Rebuilds display messages from stored sessions. Tool outputs get syntax
 //! highlighted, missing outputs fall back to plain text from `ToolResult`.
 
-use std::collections::HashMap;
-use std::path::Path;
-use std::sync::Arc;
-
 use crate::components::messages::{MessagesPanel, PromptProgress};
+use crate::components::scrollbar::ScrollInfo;
 use crate::components::tool_display::append_annotation;
 use crate::components::{DisplayMessage, DisplayRole, ToolRole, ToolStatus};
 use crate::markdown::truncate_output;
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
 
 use crate::selection::Selection;
 use maki_agent::tools::{ToolInvocation, ToolRegistry, WRITE_TOOL_NAME};
@@ -22,6 +22,8 @@ use ratatui::style::Color;
 pub(crate) const DONE_TEXT: &str = "Done!";
 pub(crate) const ERROR_TEXT: &str = "Error";
 pub(crate) const CANCELLED_TEXT: &str = "Cancelled";
+/// Messages rendered per frame when backfilling older history on resume.
+pub(crate) const RESTORE_BATCH_SIZE: usize = 32;
 
 pub enum ChatEventResult {
     Continue,
@@ -37,6 +39,7 @@ pub enum ChatEventResult {
         scopes: Vec<String>,
     },
     AuthRequired,
+    SubagentInputRequired,
 }
 
 pub struct Chat {
@@ -44,6 +47,8 @@ pub struct Chat {
     pub token_usage: TokenUsage,
     pub context_size: u32,
     pub model_id: Option<String>,
+    pub tool_use_id: Option<String>,
+    pub failed: bool,
     pending_turn_usage: Option<String>,
     messages_panel: MessagesPanel,
     finished: bool,
@@ -56,6 +61,8 @@ impl Chat {
             token_usage: TokenUsage::default(),
             context_size: 0,
             model_id: None,
+            tool_use_id: None,
+            failed: false,
             pending_turn_usage: None,
             messages_panel: MessagesPanel::new(ui_config),
             finished: false,
@@ -138,6 +145,9 @@ impl Chat {
             AgentEvent::AuthRequired => {
                 return ChatEventResult::AuthRequired;
             }
+            AgentEvent::SubagentInputRequired { .. } => {
+                return ChatEventResult::SubagentInputRequired;
+            }
             AgentEvent::ToolSnapshot {
                 id,
                 snapshot,
@@ -200,6 +210,14 @@ impl Chat {
         self.messages_panel.enable_auto_scroll();
     }
 
+    pub fn jump_to_bottom(&mut self) {
+        self.messages_panel.jump_to_bottom();
+    }
+
+    pub fn jump_to_bottom_popup(&self) -> Option<Rect> {
+        self.messages_panel.jump_to_bottom_popup()
+    }
+
     pub fn scroll_to_segment(&mut self, segment_index: usize) {
         self.messages_panel.scroll_to_segment(segment_index);
     }
@@ -231,6 +249,18 @@ impl Chat {
 
     pub fn scroll_top(&self) -> u16 {
         self.messages_panel.scroll_top()
+    }
+
+    pub fn total_lines(&self) -> u16 {
+        self.messages_panel.total_lines()
+    }
+
+    pub fn scroll_info(&self, viewport_height: u16) -> Option<ScrollInfo> {
+        self.messages_panel.scroll_info(viewport_height)
+    }
+
+    pub fn set_scroll_top(&mut self, y: u16) {
+        self.messages_panel.set_scroll_top(y);
     }
 
     pub fn segment_heights(&self) -> Vec<u16> {
@@ -294,6 +324,7 @@ impl Chat {
             return;
         }
         self.finished = true;
+        self.failed = role == DisplayRole::Error;
         self.messages_panel.flush();
         self.messages_panel
             .push(DisplayMessage::new(role, text.into()));
@@ -301,6 +332,10 @@ impl Chat {
 
     pub fn is_finished(&self) -> bool {
         self.finished
+    }
+
+    pub fn is_failed(&self) -> bool {
+        self.failed
     }
 
     pub fn update_tool_summary(&mut self, tool_id: &str, summary: &str) {
@@ -313,6 +348,10 @@ impl Chat {
 
     pub fn load_messages(&mut self, msgs: Vec<DisplayMessage>) {
         self.messages_panel.load_messages(msgs);
+    }
+
+    pub fn begin_restore(&mut self, msgs: Vec<DisplayMessage>, batch_size: usize) {
+        self.messages_panel.begin_restore(msgs, batch_size);
     }
 
     pub fn push_user_message(&mut self, text: impl Into<String>) {

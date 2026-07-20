@@ -668,7 +668,10 @@ fn resolve_session(cli: &Cli, cwd: &str) -> Result<(Option<SessionRef>, Vec<Mess
     let cli_session_id = cli
         .session_id
         .as_deref()
-        .map(|s| s.parse::<SessionRef>().map_err(|e| eyre!("invalid session id {s:?}: {e}")))
+        .map(|s| {
+            s.parse::<SessionRef>()
+                .map_err(|e| eyre!("invalid session id {s:?}: {e}"))
+        })
         .transpose()?;
 
     Ok((cli_session_id.or(resumed_id), history))
@@ -930,6 +933,7 @@ impl EventPump {
             | AgentEvent::AutoCompacting
             | AgentEvent::CompactionDone
             | AgentEvent::AuthRequired
+            | AgentEvent::SubagentInputRequired { .. }
             | AgentEvent::SubagentHistory { .. }
             | AgentEvent::ToolSnapshot { .. }
             | AgentEvent::ToolHeaderSnapshot { .. }

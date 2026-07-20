@@ -5,7 +5,9 @@ mod selection;
 mod tests;
 
 use self::render::RenderCursor;
-use self::segment::{Segment, SegmentCache, wrapped_line_count};
+use self::segment::{Segment, SegmentCache};
+
+pub(crate) use self::segment::wrapped_line_count;
 
 use super::tool_display::{
     RenderCtx, ToolLines, append_annotation, append_right_info, assistant_style,
@@ -28,8 +30,11 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::scrollbar::render_vertical_scrollbar;
+use unicode_width::UnicodeWidthStr;
+
+use super::scrollbar::{ScrollInfo, render_vertical_scrollbar};
 use super::streaming_content::StreamingContent;
+use maki_agent::tools::TASK_TOOL_NAME;
 use maki_agent::{
     BufferSnapshot, EventSender, InstructionBlock, NO_FILES_FOUND, SharedBuf, ToolDoneEvent,
     ToolOutput, ToolStartEvent,
@@ -40,9 +45,13 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Widget};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Widget};
 
 const THINKING_HIDDEN_HEADER: &str = "thinking> ...";
+pub(crate) const JUMP_TO_BOTTOM_TEXT: &str = "↓ bottom";
+const JUMP_TO_BOTTOM_THRESHOLD: u16 = 1;
+const JUMP_TO_BOTTOM_POPUP_HEIGHT: u16 = 1;
+const JUMP_TO_BOTTOM_POPUP_BOTTOM_MARGIN: u16 = 1;
 
 #[derive(Clone, Copy)]
 pub struct PromptProgress {
@@ -87,6 +96,37 @@ pub struct MessagesPanel {
     prompt_progress: Option<PromptProgress>,
     working_start: Instant,
     was_working: bool,
+    jump_to_bottom_popup: Option<Rect>,
+    /// Older display messages waiting to be prepended in batches so a long
+    /// session resumes without blocking the first paint on full rendering.
+    restore_backlog: Vec<DisplayMessage>,
+    /// Per-frame prepend sizes, drained front-to-back by `drain_restore_backlog`.
+    restore_batches: VecDeque<usize>,
+}
+
+/// Incremental restore plan: show the `initial` (most recent) messages first,
+/// then prepend the remaining older messages in `prepend_batches`-sized chunks
+/// (drained front-to-back, each chunk taken from the end of the backlog so
+/// older history lands just above what is already rendered).
+struct RestorePlan {
+    initial: usize,
+    prepend_batches: Vec<usize>,
+}
+
+fn restore_plan(total: usize, batch_size: usize) -> RestorePlan {
+    let batch_size = batch_size.max(1);
+    let initial = total.min(batch_size);
+    let mut backlog = total - initial;
+    let mut prepend_batches = Vec::new();
+    while backlog > 0 {
+        let take = backlog.min(batch_size);
+        prepend_batches.push(take);
+        backlog -= take;
+    }
+    RestorePlan {
+        initial,
+        prepend_batches,
+    }
 }
 
 impl MessagesPanel {
@@ -133,6 +173,9 @@ impl MessagesPanel {
             prompt_progress: None,
             working_start: Instant::now(),
             was_working: false,
+            jump_to_bottom_popup: None,
+            restore_backlog: Vec::new(),
+            restore_batches: VecDeque::new(),
         }
     }
 
@@ -166,6 +209,69 @@ impl MessagesPanel {
         self.rebake_requested.clear();
         self.highlight_segment = None;
         self.thinking_collapsed = !self.show_thinking;
+        self.restore_backlog.clear();
+        self.restore_batches.clear();
+    }
+
+    /// Splits `msgs` into an initial recent batch (rendered immediately) and an
+    /// older backlog that is prepended a few messages per frame so resuming a
+    /// long session does not block startup on a full render.
+    pub fn begin_restore(&mut self, msgs: Vec<DisplayMessage>, batch_size: usize) {
+        let plan = restore_plan(msgs.len(), batch_size);
+        let mut all = msgs;
+        let initial = all.split_off(all.len() - plan.initial);
+        self.load_messages(initial);
+        self.restore_backlog = all;
+        self.restore_batches = plan.prepend_batches.into();
+    }
+
+    pub fn is_restoring(&self) -> bool {
+        !self.restore_batches.is_empty()
+    }
+
+    fn drain_restore_backlog(&mut self) {
+        if self.restore_batches.is_empty() || self.cache.segments().is_empty() {
+            return;
+        }
+        let Some(take) = self.restore_batches.pop_front() else {
+            return;
+        };
+        let take = take.min(self.restore_backlog.len());
+        if take == 0 {
+            return;
+        }
+        let split = self.restore_backlog.len() - take;
+        let batch = self.restore_backlog.split_off(split);
+        self.prepend_messages(batch);
+    }
+
+    /// Prepends `msgs` (older history) in front of the existing messages,
+    /// building their render segments up front and shifting the cache so the
+    /// already-rendered recent tail stays intact.
+    pub fn prepend_messages(&mut self, mut msgs: Vec<DisplayMessage>) {
+        let n = msgs.len();
+        if n == 0 {
+            return;
+        }
+        if !self.show_thinking {
+            for msg in &mut msgs {
+                if matches!(msg.role, DisplayRole::Thinking) {
+                    msg.thinking_collapsed = true;
+                }
+            }
+        }
+        let mut built = Vec::new();
+        for (i, msg) in msgs.iter().enumerate() {
+            if !built.is_empty() {
+                built.push(Segment::spacer());
+            }
+            built.extend(self.build_segments_for_msg(msg, i));
+        }
+        if !built.is_empty() && !self.cache.segments().is_empty() {
+            built.push(Segment::spacer());
+        }
+        self.cache.prepend(built, n);
+        self.messages.splice(0..0, msgs);
     }
 
     pub fn thinking_delta(&mut self, text: &str) {
@@ -263,6 +369,9 @@ impl MessagesPanel {
             .or_else(|| event.output.annotation());
         if let Some(suffix) = &done_annotation {
             append_annotation(&mut msg.annotation, suffix);
+        }
+        if event.tool.as_ref() == TASK_TOOL_NAME {
+            append_annotation(&mut msg.annotation, "ctrl+t to view session");
         }
 
         match &event.output {
@@ -542,6 +651,15 @@ impl MessagesPanel {
         self.auto_scroll = true;
     }
 
+    pub fn jump_to_bottom(&mut self) {
+        self.auto_scroll = true;
+        self.scroll_top = self.max_scroll();
+    }
+
+    pub fn jump_to_bottom_popup(&self) -> Option<Rect> {
+        self.jump_to_bottom_popup
+    }
+
     pub fn scroll_to_segment(&mut self, segment_index: usize) {
         let width = self.viewport_width;
         let offset = self
@@ -684,6 +802,7 @@ impl MessagesPanel {
             || self.accent.is_animating()
             || !self.live_bufs.is_empty()
             || self.streaming_thinking_collapsed()
+            || self.is_restoring()
     }
 
     fn streaming_thinking_collapsed(&self) -> bool {
@@ -738,6 +857,7 @@ impl MessagesPanel {
         }
         self.drain_highlights();
         self.poll_live_bufs();
+        self.drain_restore_backlog();
         self.rebuild_line_cache();
         if self.in_progress_count() > 0 {
             self.update_spinners();
@@ -760,19 +880,19 @@ impl MessagesPanel {
             }
             streaming_heights.push(collapsed_thinking_lines.len() as u16);
         } else if !self.streaming_thinking.is_empty() {
-            let lines = self.streaming_thinking.render_lines(width);
+            let h = self.streaming_thinking.height(width);
             if cached_count > 0 || !streaming_heights.is_empty() {
                 streaming_heights.push(1);
             }
-            streaming_heights.push(wrapped_line_count(lines, width));
+            streaming_heights.push(h);
         }
 
         if !self.streaming_text.is_empty() {
-            let lines = self.streaming_text.render_lines(width);
+            let h = self.streaming_text.height(width);
             if cached_count > 0 || !streaming_heights.is_empty() {
                 streaming_heights.push(1);
             }
-            streaming_heights.push(wrapped_line_count(lines, width));
+            streaming_heights.push(h);
         }
 
         let cached_height = self.cache.total_height(width);
@@ -786,7 +906,11 @@ impl MessagesPanel {
                 self.auto_scroll = true;
             }
             if self.auto_scroll {
-                self.scroll_top = max_scroll;
+                let diff = max_scroll.saturating_sub(self.scroll_top);
+                if diff > 0 {
+                    let step = diff.div_ceil(4).max(1);
+                    self.scroll_top = self.scroll_top.saturating_add(step).min(max_scroll);
+                }
             }
         }
 
@@ -855,11 +979,23 @@ impl MessagesPanel {
         }
 
         if total_lines > area.height {
-            render_vertical_scrollbar(frame, area, total_lines, self.scroll_top);
+            let is_active = self.in_progress_count() > 0
+                || !self.streaming_text.is_empty()
+                || !self.streaming_thinking.is_empty()
+                || !self.live_bufs.is_empty();
+            let style = is_active.then_some(theme::current().spinner);
+            render_vertical_scrollbar(frame, area, total_lines, self.scroll_top, style);
         }
 
         if is_working {
             self.render_working_indicator(frame, viewport);
+        }
+
+        self.jump_to_bottom_popup = None;
+        let distance = max_scroll.saturating_sub(self.scroll_top);
+        let show_popup = max_scroll > 0 && !self.auto_scroll && distance > JUMP_TO_BOTTOM_THRESHOLD;
+        if show_popup {
+            self.render_jump_to_bottom_popup(frame, viewport);
         }
     }
 
@@ -883,12 +1019,70 @@ impl MessagesPanel {
             .render(pill_area, frame.buffer_mut());
     }
 
+    fn render_jump_to_bottom_popup(&mut self, frame: &mut Frame, area: Rect) {
+        let text_style = theme::current().accent;
+        let keybind_style = theme::current().keybind_key;
+        let line = Line::from(vec![
+            Span::styled(JUMP_TO_BOTTOM_TEXT, text_style),
+            Span::styled(key::SCROLL_BOTTOM.label, keybind_style),
+        ]);
+        let text_width = line.width() as u16;
+
+        let block = Block::default()
+            .borders(Borders::LEFT | Borders::RIGHT)
+            .border_type(BorderType::Rounded)
+            .border_style(theme::current().panel_border)
+            .padding(Padding::horizontal(1))
+            .style(Style::new().bg(theme::current().background));
+        let dummy_area = Rect::new(0, 0, u16::MAX, JUMP_TO_BOTTOM_POPUP_HEIGHT);
+        let chrome_width = u16::MAX - block.inner(dummy_area).width;
+        let width = text_width.saturating_add(chrome_width);
+
+        let min_height = JUMP_TO_BOTTOM_POPUP_HEIGHT + JUMP_TO_BOTTOM_POPUP_BOTTOM_MARGIN;
+        if text_width == 0 || width > area.width || area.height < min_height {
+            return;
+        }
+        let x = area.x + (area.width - width) / 2;
+        let y = area
+            .bottom()
+            .saturating_sub(JUMP_TO_BOTTOM_POPUP_HEIGHT + JUMP_TO_BOTTOM_POPUP_BOTTOM_MARGIN);
+        let popup_area = Rect::new(x, y, width, JUMP_TO_BOTTOM_POPUP_HEIGHT);
+        self.jump_to_bottom_popup = Some(popup_area);
+
+        let inner = block.inner(popup_area);
+        frame.render_widget(Clear, popup_area);
+        frame.render_widget(block, popup_area);
+        frame.render_widget(Paragraph::new(line), inner);
+    }
+
     fn max_scroll(&self) -> u16 {
         self.last_total_lines.saturating_sub(self.viewport_height)
     }
 
     pub fn scroll_top(&self) -> u16 {
         self.scroll_top
+    }
+
+    pub fn total_lines(&self) -> u16 {
+        self.last_total_lines
+    }
+
+    pub fn scroll_info(&self, viewport_height: u16) -> Option<ScrollInfo> {
+        let content_len = self.last_total_lines;
+        if content_len > viewport_height {
+            let max_scroll = content_len.saturating_sub(viewport_height);
+            Some(ScrollInfo {
+                content_len,
+                position: self.scroll_top.min(max_scroll),
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn set_scroll_top(&mut self, y: u16) {
+        self.scroll_top = y;
+        self.auto_scroll = false;
     }
 
     pub fn segment_heights(&self) -> Vec<u16> {
@@ -1239,7 +1433,111 @@ impl MessagesPanel {
         }
     }
 
+    fn build_segments_for_msg(&self, msg: &DisplayMessage, msg_index: usize) -> Vec<Segment> {
+        if let DisplayRole::Tool(t) = &msg.role {
+            let exp = self.expanded_tools.get(&t.id).copied().unwrap_or_default();
+            let status = t.status;
+            let tl = Self::build_tool_segment_lines(msg, status, &self.rctx(), exp);
+            let id = t.id.clone();
+            let mut seg = Segment::with_tool(id.clone());
+            seg.search_text = tl.search_text.clone();
+            seg.apply_highlight(tl, &self.hl_worker);
+            let mut out = vec![seg];
+            let blocks = msg
+                .tool_output
+                .as_deref()
+                .and_then(|o| o.owned_instructions());
+            if let Some(blocks) = blocks
+                && !blocks.is_empty()
+            {
+                let inst_id = segment::instruction_id(&id);
+                let exp = self
+                    .expanded_tools
+                    .get(&inst_id)
+                    .copied()
+                    .unwrap_or_default();
+                let tl = build_instructions_lines(&blocks, self.viewport_width, exp.output);
+                let mut inst_seg = Segment::with_tool(inst_id);
+                inst_seg.search_text = tl.search_text.clone();
+                inst_seg.apply_highlight(tl, &self.hl_worker);
+                out.push(Segment::spacer());
+                out.push(inst_seg);
+            }
+            return out;
+        }
+        if matches!(&msg.role, DisplayRole::Thinking) && msg.thinking_collapsed {
+            let text = msg.text.clone();
+            let lines = self.build_cached_thinking_indicator(&text);
+            let search_text = format!("thinking> {text}");
+            return vec![Segment::with_lines(
+                lines,
+                search_text,
+                Some(text),
+                0,
+                Some(msg_index),
+            )];
+        }
+        let style = match &msg.role {
+            DisplayRole::User => user_style(),
+            DisplayRole::Assistant => assistant_style(),
+            DisplayRole::Thinking => thinking_style(),
+            DisplayRole::Error => error_style(),
+            DisplayRole::Done => done_style(),
+            DisplayRole::Tool(_) => unreachable!(),
+        };
+        let prefix = if msg.plan_path.is_some() {
+            ""
+        } else {
+            style.prefix
+        };
+        let mut lines = if style.use_markdown {
+            text_to_lines(
+                &msg.text,
+                prefix,
+                style.text_style,
+                style.prefix_style,
+                self.viewport_width,
+                style.max_line_bytes,
+            )
+        } else {
+            plain_lines(&msg.text, prefix, style.text_style, style.prefix_style)
+        };
+        if let Some(pp) = &msg.plan_path {
+            if !msg.text.is_empty() {
+                let rule = hr_line(self.viewport_width, theme::current().plan_rule);
+                lines.insert(0, rule.clone());
+                lines.push(rule);
+            } else {
+                lines.clear();
+            }
+            if !msg.text.is_empty() {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::styled(
+                pp.to_owned(),
+                theme::current().plan_path,
+            )));
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "{} to open in editor ($VISUAL / $EDITOR)",
+                    key::OPEN_EDITOR.label
+                ),
+                theme::current().tool_dim,
+            )));
+        }
+        let prefix_width = prefix.width() as u16;
+        let search_text = format!("{prefix}{}", msg.text);
+        vec![Segment::with_lines(
+            lines,
+            search_text,
+            Some(msg.text.clone()),
+            prefix_width,
+            Some(msg_index),
+        )]
+    }
+
     fn rebuild_line_cache(&mut self) {
+        let _start = self.cache.msg_count();
         if !self.cache.needs_rebuild(self.messages.len()) {
             return;
         }
@@ -1255,6 +1553,7 @@ impl MessagesPanel {
                 self.cache.push_spacer_if_needed();
                 let mut seg = Segment::with_tool(id.clone());
                 seg.search_text = search_text;
+                seg.raw_text = Some(msg.text.clone());
                 seg.apply_highlight(tl, &self.hl_worker);
                 self.cache.push(seg);
 
@@ -1272,8 +1571,13 @@ impl MessagesPanel {
                     let lines = self.build_cached_thinking_indicator(&text);
                     let search_text = format!("thinking> {text}");
                     self.cache.push_spacer_if_needed();
-                    self.cache
-                        .push(Segment::with_lines(lines, search_text, Some(i)));
+                    self.cache.push(Segment::with_lines(
+                        lines,
+                        search_text,
+                        Some(text),
+                        0,
+                        Some(i),
+                    ));
                     continue;
                 }
                 let style = match &msg.role {
@@ -1325,10 +1629,16 @@ impl MessagesPanel {
                     )));
                 }
 
+                let prefix_width = prefix.width() as u16;
                 let search_text = format!("{prefix}{}", msg.text);
                 self.cache.push_spacer_if_needed();
-                self.cache
-                    .push(Segment::with_lines(lines, search_text, Some(i)));
+                self.cache.push(Segment::with_lines(
+                    lines,
+                    search_text,
+                    Some(msg.text.clone()),
+                    prefix_width,
+                    Some(i),
+                ));
             }
         }
         self.cache.mark_built(self.messages.len());

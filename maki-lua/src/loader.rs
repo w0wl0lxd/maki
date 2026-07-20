@@ -161,6 +161,22 @@ impl PluginHost {
         Self { inner: None }
     }
 
+    /// Stop the Lua thread from taking new work without joining it, so the
+    /// caller can rebuild shared state (like the tool registry) while the
+    /// old VM winds down on its own. The flag makes the watchdog abort
+    /// in-flight callbacks, `Shutdown` on the priority lane skips ahead of
+    /// queued bulk work, and swapping the senders for disconnected ones
+    /// makes every later host call fail right at the send; `&mut self`
+    /// rules out a call racing the swap. `Drop` still joins the thread.
+    pub fn begin_shutdown(&mut self) {
+        if let Some(ref mut inner) = self.inner {
+            inner.shutdown.store(true, Ordering::Release);
+            let _ = inner.prio_tx.send(Request::Shutdown);
+            inner.tx = flume::unbounded().0;
+            inner.prio_tx = flume::unbounded().0;
+        }
+    }
+
     /// Boots the runtime and loads every default bundled plugin into `registry`.
     /// For callers like tests and docgen that want the full builtin set
     /// without building a config.
@@ -231,6 +247,8 @@ impl PluginHost {
                 );
             }
         }
+
+        let mut prepared = Vec::with_capacity(config.names.len());
         for builtin in &config.names {
             let dir = match BUNDLED_PLUGINS.iter().find(|p| p.name == builtin.as_str()) {
                 Some(p) => &p.dir,
@@ -247,20 +265,45 @@ impl PluginHost {
                     plugin: builtin.clone(),
                     source: mlua::Error::runtime("bundled plugin missing init.lua"),
                 })?;
-            let name: Arc<str> = Arc::from(builtin.as_str());
             let opts = config
                 .opts
                 .get(builtin.as_str())
                 .cloned()
                 .map(Arc::new)
                 .unwrap_or_default();
-            self.send_load(
+            prepared.push((Arc::from(builtin.as_str()), init.to_owned(), opts));
+        }
+
+        // Pipeline: queue every LoadSource before collecting any reply. The
+        // Lua runtime is single-threaded, so it still loads plugins in order,
+        // but it now drains the queue back-to-back instead of paying a host
+        // round-trip between each one. A failing builtin no longer blocks the
+        // rest from loading; the first error (in send order) is returned.
+        let tx = self.tx()?;
+        let mut replies = Vec::with_capacity(prepared.len());
+        for (name, source, opts) in prepared {
+            let (reply_tx, reply_rx) = flume::bounded(1);
+            tx.send(Request::LoadSource {
                 name,
-                init.to_owned(),
-                None,
-                PluginPermissions::trusted(),
+                source,
+                plugin_dir: None,
+                permissions: PluginPermissions::trusted(),
                 opts,
-            )?;
+                reply: reply_tx,
+            })
+            .map_err(|_| PluginError::HostDead)?;
+            replies.push(reply_rx);
+        }
+        let mut first_err = None;
+        for rx in replies {
+            if let Err(e) = rx.recv().map_err(|_| PluginError::HostDead)?
+                && first_err.is_none()
+            {
+                first_err = Some(e);
+            }
+        }
+        if let Some(err) = first_err {
+            return Err(err);
         }
         Ok(())
     }
@@ -563,6 +606,61 @@ mod tests {
         let mut host = PluginHost::disabled();
         host.load_builtins(&PluginsConfig::from_plugins(HashMap::new()))
             .unwrap();
+    }
+
+    /// The second call sends `Shutdown` on a sender that is already
+    /// disconnected; it must swallow that error and keep rejecting work.
+    #[test]
+    fn begin_shutdown_rejects_later_loads_and_is_idempotent() {
+        let mut host = PluginHost::new(Arc::new(ToolRegistry::new())).unwrap();
+        host.begin_shutdown();
+        assert!(host.load_source("late", "return {}").is_err());
+        host.begin_shutdown();
+        assert!(host.load_source("later", "return {}").is_err());
+    }
+
+    #[test]
+    fn begin_shutdown_on_disabled_host_is_noop() {
+        PluginHost::disabled().begin_shutdown();
+    }
+
+    /// Regression for the exit drain in `runtime::spawn`. An `EventHandle`
+    /// clone keeps queued requests alive after the Lua thread exits, and
+    /// dispatch prefers the priority lane, so a bulk request queued behind
+    /// `Shutdown` is never served. Without the drain its reply sender lives
+    /// forever and `collect_prompt_slots` blocks; with it, the call falls
+    /// back to defaults right away.
+    #[test]
+    fn live_event_handle_does_not_hang_after_begin_shutdown() {
+        let mut host = PluginHost::new(Arc::new(ToolRegistry::new())).unwrap();
+        host.load_source(
+            "hinted",
+            r#"maki.api.register_prompt_hint({ slot = "tool_usage", content = "live" })"#,
+        )
+        .unwrap();
+        let handle = host.event_handle().unwrap();
+        host.begin_shutdown();
+
+        let slots = handle.collect_prompt_slots();
+        assert!(
+            contents(&slots, PromptId::System, Slot::ToolUsage).is_empty(),
+            "dead host must yield defaults, not real slots"
+        );
+
+        drop(host);
+        let slots = handle.collect_prompt_slots();
+        assert!(contents(&slots, PromptId::System, Slot::ToolUsage).is_empty());
+    }
+
+    #[test]
+    fn pipelined_load_registers_every_builtin() {
+        let reg = Arc::new(ToolRegistry::new());
+        let mut host = PluginHost::new(Arc::clone(&reg)).unwrap();
+        host.load_builtins(&PluginsConfig::from_plugins(HashMap::new()))
+            .unwrap();
+        for tool in ["read", "grep", "glob", "bash"] {
+            assert!(reg.has(tool), "pipelined load must register {tool}");
+        }
     }
 
     /// Load `src` as one plugin, collect resolved slots.

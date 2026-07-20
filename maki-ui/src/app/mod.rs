@@ -48,7 +48,7 @@ use crate::components::{
     Action, DisplayMessage, DisplayRole, ExitRequest, Overlay, RetryInfo, Status, is_ctrl,
 };
 use crate::image;
-use crate::selection::{SelectionState, ZoneRegistry};
+use crate::selection::{SelectionState, SelectionZone, ZoneRegistry};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use maki_agent::permissions::PermissionManager;
@@ -71,6 +71,7 @@ pub(crate) use mode::{Mode, PlanState, PlanTrigger};
 #[cfg(test)]
 use mouse::EDGE_SCROLL_LINES;
 pub(crate) use queue::{MessageQueue, SubmitOutcome};
+pub(crate) use session::session_has_content;
 use session_state::SessionState;
 
 const CANCEL_MSG: &str = "Cancelled.";
@@ -90,23 +91,43 @@ const WORKFLOW_OFF_MSG: &str = "Workflow mode: off";
 const IMPLEMENT_MSG_PREFIX: &str = "Implement the plan";
 const IMPLEMENT_PARALLEL_HINT: &str = "Use batch+task to parallelize, assign each subagent a separate module and restrict its tests to that module to avoid interference.";
 
-const TASK_DONE_DETAIL: &str = "✓ ";
+const TASK_DONE_DETAIL: &str = "✓ done";
+const TASK_ERROR_DETAIL: &str = "✗ error";
+const TASK_RUNNING_DETAIL: &str = "◈ running";
+const TASK_PANEL_FOOTER: &[(&str, &str)] = &[("enter", "attach"), ("esc", "close")];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TaskStatus {
+    Main,
+    Running,
+    Done,
+    Error,
+}
 
 #[derive(Clone)]
 pub(super) struct TaskEntry {
     name: String,
-    finished: Option<bool>,
+    status: TaskStatus,
+    usage: Option<String>,
 }
 
 impl PickerItem for TaskEntry {
     fn label(&self) -> &str {
         &self.name
     }
+    fn suffix(&self) -> Option<&str> {
+        self.usage.as_deref()
+    }
     fn detail(&self) -> Option<&str> {
-        matches!(self.finished, Some(true)).then_some(TASK_DONE_DETAIL)
+        match self.status {
+            TaskStatus::Done => Some(TASK_DONE_DETAIL),
+            TaskStatus::Error => Some(TASK_ERROR_DETAIL),
+            TaskStatus::Running => Some(TASK_RUNNING_DETAIL),
+            TaskStatus::Main => None,
+        }
     }
     fn is_spinning(&self) -> bool {
-        matches!(self.finished, Some(false))
+        self.status == TaskStatus::Running
     }
 }
 
@@ -116,6 +137,9 @@ pub(super) enum PendingInput {
     None,
     AuthRetry {
         subagent_id: Option<String>,
+    },
+    SubagentFollowUp {
+        subagent_id: String,
     },
 }
 
@@ -161,6 +185,7 @@ pub struct App {
     pub(super) retry_info: Option<RetryInfo>,
     pub(super) zones: ZoneRegistry,
     pub(super) selection_state: Option<SelectionState>,
+    pub(super) scrollbar_drag: Option<mouse::ScrollbarDrag>,
     pub(super) clipboard: ClipboardState,
     pub(super) last_esc: Option<Instant>,
 
@@ -180,6 +205,7 @@ pub struct App {
     pub(crate) restore_event_tx: Option<maki_agent::EventSender>,
     pub(super) restoring: Arc<AtomicBool>,
     subagent_answers: HashMap<String, flume::Sender<String>>,
+    subagent_prompts: HashMap<String, flume::Sender<String>>,
 }
 
 impl App {
@@ -202,11 +228,13 @@ impl App {
     ) -> Self {
         scrollbar::set_enabled(ui_config.scrollbar);
         let state = SessionState::from_session(session, model, &storage);
+        let mut input_box = InputBox::new(InputHistory::load(&storage, input_history_size));
+        input_box.set_max_input_lines(ui_config.max_input_lines);
         let mut app = Self {
             chats: vec![Chat::new("Main".into(), ui_config)],
             active_chat: 0,
             chat_index: HashMap::new(),
-            input_box: InputBox::new(InputHistory::load(&storage, input_history_size)),
+            input_box,
             command_palette: CommandPalette::new(
                 custom_commands,
                 mcp_reader.clone(),
@@ -240,6 +268,7 @@ impl App {
             retry_info: None,
             zones: ZoneRegistry::new(),
             selection_state: None,
+            scrollbar_drag: None,
             clipboard: ClipboardState::new(),
             last_esc: None,
             storage,
@@ -258,6 +287,7 @@ impl App {
             restore_event_tx: None,
             restoring: Arc::new(AtomicBool::new(false)),
             subagent_answers: HashMap::new(),
+            subagent_prompts: HashMap::new(),
         };
         app.model_picker
             .set_recents(maki_storage::model::read_recents(&app.storage));
@@ -352,8 +382,27 @@ impl App {
                 vec![]
             }
             Msg::Scroll { column, row, delta } => {
-                self.clear_selection_unless_pending_copy();
+                let drag_zone = self.selection_state.as_ref().and_then(|s| match s {
+                    SelectionState::Dragging { sel, .. } => Some(sel.zone),
+                    _ => None,
+                });
                 self.handle_scroll(column, row, delta);
+                if let Some(zone) = self.zone_at(row, column) {
+                    if drag_zone == Some(zone.zone)
+                        && matches!(zone.zone, SelectionZone::Messages | SelectionZone::Input)
+                    {
+                        let scroll = self.scroll_offset(zone.zone);
+                        if let Some(SelectionState::Dragging { sel, .. }) =
+                            &mut self.selection_state
+                        {
+                            sel.update(row, column, scroll);
+                        }
+                    } else {
+                        self.clear_selection_unless_pending_copy();
+                    }
+                } else {
+                    self.clear_selection_unless_pending_copy();
+                }
                 vec![]
             }
             Msg::Agent(envelope) => self.handle_agent_event(*envelope),
@@ -372,6 +421,15 @@ impl App {
             let _ = tx.try_send(answer);
         } else {
             self.send_answer(answer);
+        }
+    }
+
+    fn send_subagent_prompt(&mut self, subagent_id: &str, message: String) {
+        if let Some(tx) = self.subagent_prompts.get(subagent_id) {
+            let _ = tx.try_send(message.clone());
+        }
+        if let Some(&idx) = self.chat_index.get(subagent_id) {
+            self.chats[idx].show_user_message(message);
         }
     }
 
@@ -417,12 +475,32 @@ impl App {
             .chats
             .iter()
             .enumerate()
-            .map(|(i, c)| TaskEntry {
-                name: c.name.clone(),
-                finished: (i > 0).then_some(c.is_finished()),
+            .map(|(i, c)| {
+                let status = if i == 0 {
+                    TaskStatus::Main
+                } else if c.is_failed() {
+                    TaskStatus::Error
+                } else if c.is_finished() {
+                    TaskStatus::Done
+                } else {
+                    TaskStatus::Running
+                };
+                let usage = (c.token_usage.total_input() + c.token_usage.output > 0).then(|| {
+                    format!(
+                        "{} in / {} out",
+                        c.token_usage.total_input(),
+                        c.token_usage.output
+                    )
+                });
+                TaskEntry {
+                    name: c.name.clone(),
+                    status,
+                    usage,
+                }
             })
             .collect();
         self.task_picker_original = Some(self.active_chat);
+        self.task_picker.set_footer(TASK_PANEL_FOOTER);
         self.task_picker.open(entries, " Tasks ");
         self.task_picker.select(self.active_chat);
     }
@@ -474,7 +552,7 @@ impl App {
             return Some(vec![]);
         }
         if key::SCROLL_BOTTOM.matches(key) {
-            self.active_chat().enable_auto_scroll();
+            self.active_chat().jump_to_bottom();
             return Some(vec![]);
         }
         if key::PLAN_TOGGLE.matches(key)
@@ -570,7 +648,12 @@ impl App {
                     vec![]
                 }
                 FilePickerModalAction::Close => {
+                    let was_at = self.file_picker.take_at_mention();
                     self.file_picker.close();
+                    if was_at {
+                        self.input_box.buffer.push_char('@');
+                        self.command_palette.sync(&self.input_box.buffer.value());
+                    }
                     vec![]
                 }
             });
@@ -694,9 +777,14 @@ impl App {
         }
 
         if !self.is_main_chat() {
+            let finished = self.chats[self.active_chat].is_finished();
             return match key.code {
-                KeyCode::Tab if !self.is_bash_input() => self.toggle_mode(),
-                KeyCode::Esc if !self.chats[self.active_chat].is_finished() => {
+                KeyCode::Esc if finished => {
+                    self.active_chat = 0;
+                    vec![]
+                }
+                KeyCode::Char('x') if !finished => self.handle_subagent_cancel(),
+                KeyCode::Esc if !finished => {
                     if let Some(t) = self.last_esc.take()
                         && t.elapsed() < self.status_bar.flash_duration
                     {
@@ -775,6 +863,10 @@ impl App {
         let streaming = self.status == Status::Streaming;
         match self.input_box.handle_key(key) {
             InputAction::Submit(sub) => self.handle_submit(sub),
+            InputAction::OpenFilePicker => {
+                self.file_picker.open_via_at(&self.state.session.cwd);
+                vec![]
+            }
             InputAction::PaletteSync(val) => {
                 self.command_palette.sync(&val);
                 vec![]
@@ -839,6 +931,10 @@ impl App {
                 self.send_to_agent(subagent_id.as_deref(), String::new());
                 return vec![];
             }
+            PendingInput::SubagentFollowUp { subagent_id } => {
+                self.send_subagent_prompt(&subagent_id, sub.text);
+                return vec![];
+            }
             PendingInput::None => {}
         }
         if sub.is_empty() {
@@ -874,6 +970,7 @@ impl App {
         self.pending_input = PendingInput::None;
         self.finish_subagents(DisplayRole::Error, CANCELLED_TEXT);
         self.subagent_answers.clear();
+        self.subagent_prompts.clear();
         self.shell.cancel_all();
         for chat in &mut self.chats {
             chat.flush();
@@ -1067,6 +1164,17 @@ impl App {
             return vec![];
         }
 
+        if let ChatEventResult::SubagentInputRequired = result {
+            if let Some(id) = subagent_id {
+                self.pending_input = PendingInput::SubagentFollowUp { subagent_id: id };
+                self.chats[chat_idx].push(DisplayMessage::new(
+                    DisplayRole::Assistant,
+                    "Waiting for your follow-up...".into(),
+                ));
+            }
+            return vec![];
+        }
+
         if chat_idx == 0 {
             match result {
                 ChatEventResult::Done => {
@@ -1074,6 +1182,7 @@ impl App {
                     self.save_session();
                     self.chat_index.clear();
                     self.subagent_answers.clear();
+                    self.subagent_prompts.clear();
                     self.status = Status::Idle;
                     self.fire_session_autocmd("TurnEnd", serde_json::json!({}));
                     if self.exit_on_done {
@@ -1086,7 +1195,10 @@ impl App {
                     self.save_session();
                     self.queue.clear();
                     self.subagent_answers.clear();
+                    self.subagent_prompts.clear();
                     self.finish_subagents(DisplayRole::Error, ERROR_TEXT);
+                    self.chats[chat_idx]
+                        .push(DisplayMessage::new(DisplayRole::Error, message.clone()));
                     for chat in &mut self.chats {
                         chat.fail_in_progress_with_message(message.clone());
                     }
@@ -1099,6 +1211,7 @@ impl App {
                     }
                 }
                 ChatEventResult::AuthRequired
+                | ChatEventResult::SubagentInputRequired
                 | ChatEventResult::PermissionRequest { .. }
                 | ChatEventResult::QueueItemConsumed { .. } => unreachable!(),
                 ChatEventResult::Continue => {}
@@ -1117,12 +1230,16 @@ impl App {
         if let Some(ref tx) = subagent.answer_tx {
             self.subagent_answers.insert(id.clone(), tx.clone());
         }
+        if let Some(ref tx) = subagent.prompt_tx {
+            self.subagent_prompts.insert(id.clone(), tx.clone());
+        }
         self.chats[0].update_tool_summary(id, &subagent.name);
         if let Some(ref model) = subagent.model {
             self.chats[0].update_tool_model(id, model);
         }
         let mut chat = Chat::new(subagent.name.clone(), self.ui_config);
         chat.set_restore_channel(self.lua_event_handle.clone(), self.restore_event_tx.clone());
+        chat.tool_use_id = Some(id.clone());
         chat.model_id = subagent.model.clone();
         if let Some(ref prompt) = subagent.prompt {
             chat.push_user_message(prompt);

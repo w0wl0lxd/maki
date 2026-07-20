@@ -382,6 +382,12 @@ pub const KEYBINDS: &[Keybind] = &[
         platform: Platform::All,
     },
     Keybind {
+        label: KeyLabel::Single("@"),
+        description: "Mention a file (Esc leaves a literal @)",
+        context: KeybindContext::Editing,
+        platform: Platform::All,
+    },
+    Keybind {
         label: KeyLabel::MacAlt(key::DELETE_WORD.label, "⌥⌫"),
         description: "Delete word backward",
         context: KeybindContext::Editing,
@@ -437,7 +443,7 @@ pub const KEYBINDS: &[Keybind] = &[
     },
     Keybind {
         label: KeyLabel::Single(key::SCROLL_BOTTOM.label),
-        description: "Scroll to bottom",
+        description: "Scroll to bottom and resume auto-scroll",
         context: KeybindContext::Editing,
         platform: Platform::All,
     },

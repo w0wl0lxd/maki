@@ -1,17 +1,17 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::Frame;
 
-use maki_agent::permissions::{DEFAULT_DENY_GUIDANCE, PermissionAnswer, generalized_scopes};
+use maki_agent::permissions::{generalized_scopes, PermissionAnswer, DEFAULT_DENY_GUIDANCE};
 use maki_config::ToolKey;
 
-use crate::components::Overlay;
 use crate::components::form::render_form;
 use crate::components::hint_line;
 use crate::components::is_ctrl;
+use crate::components::Overlay;
 use crate::text_buffer::TextBuffer;
 use crate::theme;
 
@@ -300,7 +300,7 @@ impl PermissionPrompt {
             };
             let (before, after) = display_text.split_at(cursor_pos);
             let mut chars = after.chars();
-            let cursor_ch = chars.next().map_or(' ', |c| c);
+            let cursor_ch = chars.next().unwrap_or(' ');
             let rest: String = chars.collect();
 
             let mut spans = vec![Span::raw("  "), Span::styled("guide ", label_style)];

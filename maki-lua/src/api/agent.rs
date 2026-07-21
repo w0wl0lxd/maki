@@ -989,4 +989,136 @@ mod tests {
         let wrong = call("function() return 42 end", input).unwrap_err();
         assert!(wrong.contains("expected string"), "got: {wrong}");
     }
+
+    #[test]
+    fn progress_initial_state() {
+        let p = Progress::new(Instant::now());
+        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(state.current.is_none(), "no tool running initially");
+        assert!(state.recent.is_empty(), "no completed tools initially");
+        assert!(!state.done, "not done initially");
+        assert_eq!(state.completed_count, 0);
+    }
+
+    #[test]
+    fn progress_set_current() {
+        let p = Progress::new(Instant::now());
+        p.set_current("bash");
+        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.current.as_deref(), Some("bash"));
+        assert!(state.recent.is_empty());
+        assert!(!state.done);
+        assert_eq!(state.completed_count, 0);
+    }
+
+    #[test]
+    fn progress_set_current_replaces_previous() {
+        let p = Progress::new(Instant::now());
+        p.set_current("bash");
+        p.set_current("glob");
+        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.current.as_deref(), Some("glob"));
+    }
+
+    #[test]
+    fn progress_add_recent_clears_current() {
+        let p = Progress::new(Instant::now());
+        p.set_current("bash");
+        p.add_recent("bash");
+        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(state.current.is_none(), "current cleared after completion");
+        assert_eq!(state.completed_count, 1);
+        assert_eq!(state.recent.len(), 1);
+        assert_eq!(state.recent[0], "bash");
+    }
+
+    #[test]
+    fn progress_add_recent_orders_by_completion() {
+        let p = Progress::new(Instant::now());
+        p.set_current("bash");
+        p.add_recent("bash");
+        p.set_current("grep");
+        p.add_recent("grep");
+        p.set_current("glob");
+        p.add_recent("glob");
+        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.completed_count, 3);
+        assert_eq!(state.recent.len(), 3);
+        assert_eq!(state.recent[0], "bash");
+        assert_eq!(state.recent[1], "grep");
+        assert_eq!(state.recent[2], "glob");
+    }
+
+    #[test]
+    fn progress_add_recent_caps_at_max() {
+        let p = Progress::new(Instant::now());
+        for i in 0..PROGRESS_MAX_RECENT + 3 {
+            p.set_current(&format!("tool_{i}"));
+            p.add_recent(&format!("tool_{i}"));
+        }
+        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.completed_count, (PROGRESS_MAX_RECENT + 3) as u64);
+        assert_eq!(state.recent.len(), PROGRESS_MAX_RECENT);
+        assert_eq!(state.recent[0], "tool_3");
+        assert_eq!(state.recent[PROGRESS_MAX_RECENT - 1], "tool_7");
+    }
+
+    #[test]
+    fn progress_set_done() {
+        let p = Progress::new(Instant::now());
+        p.set_current("bash");
+        p.set_done();
+        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(state.done);
+        assert!(state.current.is_none());
+    }
+
+    #[test]
+    fn progress_set_done_idempotent() {
+        let p = Progress::new(Instant::now());
+        p.set_done();
+        p.set_done();
+        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(state.done);
+    }
+
+    #[test]
+    fn progress_notify_sends_signal() {
+        let p = Progress::new(Instant::now());
+        assert!(p.rx.is_empty(), "no signal before notify");
+        p.notify();
+        assert!(!p.rx.is_empty(), "signal available after notify");
+    }
+
+    #[test]
+    fn progress_full_lifecycle() {
+        let p = Progress::new(Instant::now());
+        assert!(p.rx.is_empty());
+
+        p.set_current("write");
+        assert!(!p.rx.is_empty());
+
+        p.rx.drain();
+        p.add_recent("write");
+        assert!(!p.rx.is_empty());
+
+        p.rx.drain();
+        p.set_done();
+        assert!(!p.rx.is_empty());
+
+        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.completed_count, 1);
+        assert_eq!(state.recent.len(), 1);
+        assert!(state.done);
+    }
+
+    #[test]
+    fn progress_add_recent_without_current() {
+        let p = Progress::new(Instant::now());
+        p.add_recent("direct_complete");
+        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(state.current.is_none());
+        assert_eq!(state.completed_count, 1);
+        assert_eq!(state.recent[0], "direct_complete");
+    }
 }

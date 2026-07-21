@@ -755,6 +755,9 @@ fn sanitize_property_schema(schema: &mut Value) {
 }
 
 fn sanitize_array_schema(map: &mut serde_json::Map<String, Value>) {
+    // OpenAI provider does not support tuple items (prefixItems).
+    // Only the first element is kept; multi-element tuples are a non-goal
+    // for the current tool schema boundary.
     if let Some(prefix) = map.remove("prefixItems") {
         let items = match prefix {
             Value::Array(mut arr) if !arr.is_empty() => {

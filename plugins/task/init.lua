@@ -6,6 +6,7 @@
 -- `maki.async.semaphore`).
 
 local ToolView = require("maki.tool_view")
+local output_limits = require("maki.output_limits")
 
 local STRUCTURED_OUTPUT_NAME = "structured_output"
 local STRUCTURED_OUTPUT_DESCRIPTION = "Report your final result. Call it exactly once when your task is complete."
@@ -23,7 +24,6 @@ local INVALID_INPUT_PREFIX =
 local BODY_INDENT_COLS = 4
 local MIN_MD_WIDTH = 20
 local DEFAULT_OUTPUT_LINES = 5
-local DEFAULT_MAX_LINE_BYTES = 500
 
 local description = [[Launch an autonomous subagent to perform tasks independently. Best combined with batch.
 
@@ -208,7 +208,7 @@ local function restore(_input, output, is_error, ctx)
   local opts = {
     max_lines = (tol and tol.task) or DEFAULT_OUTPUT_LINES,
     keep = "head",
-    max_line_bytes = DEFAULT_MAX_LINE_BYTES,
+    max_line_bytes = output_limits.DEFAULT_MAX_LINE_BYTES,
   }
   if not is_error then
     local width = math.max(maki.ui.terminal_size().cols - BODY_INDENT_COLS, MIN_MD_WIDTH)

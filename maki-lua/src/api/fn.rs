@@ -224,9 +224,11 @@ fn shell_command(cmd: &str) -> Result<Command, String> {
     #[cfg(windows)]
     {
         let bash = maki_config::find_bash_on_path().ok_or_else(|| {
-            "bash not found on Windows. Install Git for Windows \
-             (https://git-scm.com) or enable WSL \
-             (https://learn.microsoft.com/en-us/windows/wsl/install)."
+            "bash not found on Windows. Install Git for Windows:\n  \
+             winget install --id Git.Git -e --source winget\n  \
+             or download from https://git-scm.com/download/win\n\n  \
+             Alternatively, enable WSL: \
+             https://learn.microsoft.com/en-us/windows/wsl/install"
                 .to_string()
         })?;
         let mut c = Command::new(bash);

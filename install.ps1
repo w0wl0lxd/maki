@@ -99,6 +99,35 @@ function Install-Maki([string]$Tag) {
     }
 }
 
+function Test-BashAvailable {
+    $paths = $env:Path -split ';'
+    foreach ($dir in $paths) {
+        $bashPath = Join-Path $dir.Trim('"') "bash.exe"
+        if (Test-Path -LiteralPath $bashPath -PathType Leaf) {
+            return $true
+        }
+    }
+    $candidates = @(
+        "C:\Program Files\Git\bin\bash.exe",
+        "C:\Program Files\Git\usr\bin\bash.exe",
+        "C:\Program Files (x86)\Git\bin\bash.exe",
+        "C:\cygwin64\bin\bash.exe",
+        "C:\cygwin\bin\bash.exe",
+        "C:\msys64\usr\bin\bash.exe",
+        "C:\msys32\usr\bin\bash.exe"
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Test-WinGetAvailable {
+    return $null -ne (Get-Command winget -ErrorAction Ignore)
+}
+
 function Add-ToUserPath([string]$Dir) {
     $sep = [IO.Path]::PathSeparator
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -119,3 +148,31 @@ function Add-ToUserPath([string]$Dir) {
 
 $tag = if ($args.Count -ge 1) { $args[0] } else { $null }
 Install-Maki -Tag $tag
+
+if (-not (Test-BashAvailable)) {
+    Write-Host ""
+    Write-Host "maki's bash tool requires Git for Windows or WSL on Windows."
+    Write-Host "bash was not found on your system."
+
+    if (Test-WinGetAvailable) {
+        Write-Host ""
+        Write-Host "Install Git for Windows with winget:"
+        $answer = Read-Host "Install Git for Windows now? (y/N)"
+        if ($answer -match '^[yY]') {
+            winget install --id Git.Git -e --source winget --accept-package-agreements --accept-source-agreements
+            if (Test-BashAvailable) {
+                Write-Host "bash is now available. Restart your terminal to use maki's bash tool."
+            } else {
+                Write-Host "Installer finished but bash was not found on PATH."
+                Write-Host "Restart your terminal or add Git\bin to your PATH manually."
+            }
+        }
+    } else {
+        Write-Host ""
+        Write-Host "To install Git for Windows, download from:"
+        Write-Host "  https://git-scm.com/download/win"
+        Write-Host ""
+        Write-Host "Or install winget (https://aka.ms/getwinget) for one-command setup:"
+        Write-Host "  winget install --id Git.Git -e --source winget"
+    }
+}

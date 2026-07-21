@@ -4,7 +4,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::shell::parse_shell_prefix;
 use crate::highlight;
-use crate::text_buffer::{EditResult, TextBuffer, is_newline_key};
+use crate::text_buffer::{is_newline_key, EditResult, TextBuffer};
 use crate::theme;
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -12,17 +12,18 @@ use maki_storage::input_history::InputHistory;
 use std::mem;
 
 use maki_providers::ImageSource;
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+use ratatui::Frame;
 
 use super::scrollbar::render_vertical_scrollbar;
 use super::{apply_scroll_delta, visual_line_count};
 use crate::selection::LineBreaks;
 
 const MAX_INPUT_LINES: u16 = 20;
+const BORDER_LINES: u16 = 2;
 const CHEVRON: &str = super::CHEVRON;
 const NEWLINE_PAD: &str = "  ";
 const PREFIX_WIDTH: u16 = 2;
@@ -172,7 +173,7 @@ impl InputBox {
     }
 
     pub fn set_max_input_lines(&mut self, max: u32) {
-        self.max_input_lines = max.clamp(1, u16::MAX as u32 - 2) as u16;
+        self.max_input_lines = max.clamp(1, u16::MAX as u32 - BORDER_LINES as u32) as u16;
     }
 
     pub fn copy_text(&self) -> String {
@@ -205,7 +206,7 @@ impl InputBox {
             visual_lines += 1;
         }
         let capped = visual_lines.min(self.max_input_lines as usize);
-        (capped + 2) as u16
+        (capped + BORDER_LINES as usize) as u16
     }
 
     pub fn is_at_first_line(&self) -> bool {
@@ -326,7 +327,7 @@ impl InputBox {
         focused: bool,
         top_right_hint: Option<Line<'_>>,
     ) {
-        let content_height = area.height.saturating_sub(2);
+        let content_height = area.height.saturating_sub(BORDER_LINES);
         let ew = effective_width(area.width as usize);
 
         if self.follow_cursor {

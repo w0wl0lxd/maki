@@ -21,6 +21,7 @@ pub mod diff;
 pub mod permissions;
 pub mod prompt;
 pub mod template;
+pub mod tokenize;
 pub mod tools;
 pub use tools::ToolFilter;
 pub mod types;

@@ -3293,9 +3293,7 @@ fn typing_in_finished_subagent_flashes_explanation() {
     app.update(Msg::Key(key(KeyCode::Char('h'))));
     app.update(Msg::Key(key(KeyCode::Enter)));
 
-    assert_eq!(
-        app.status_bar.flash_text(),
-        Some(STEERING_UNAVAILABLE_MSG)
-    );
+    assert_eq!(app.status_bar.flash_text(), Some(STEERING_UNAVAILABLE_MSG));
     assert!(prompt_rx.try_recv().is_err());
+    assert!(!app.subagent_prompts.contains_key("task1"));
 }

@@ -1004,8 +1004,8 @@ fn call_local_tool(
 mod tests {
     use serde_json::json;
 
-    use maki_agent::{ExtractedCommand, InterruptSource};
     use super::*;
+    use maki_agent::{ExtractedCommand, InterruptSource};
 
     fn call(src: &str, input: JsonValue) -> Result<String, String> {
         let lua = Lua::new();

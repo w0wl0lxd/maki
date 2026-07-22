@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use flume::Sender;
 use maki_config::ToolKey;
-use maki_providers::{AgentError, ContentBlock, Message, Role, StopReason, TokenUsage};
+use maki_providers::{
+    AgentError, ContentBlock, ImageSource, Message, Role, StopReason, TokenUsage,
+};
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 
@@ -821,6 +823,12 @@ pub struct TurnCompleteEvent {
     pub context_size: Option<u32>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SubagentPrompt {
+    pub text: String,
+    pub images: Vec<ImageSource>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SubagentInfo {
     pub parent_tool_use_id: String,
@@ -833,7 +841,7 @@ pub struct SubagentInfo {
     #[serde(skip)]
     pub answer_tx: Option<flume::Sender<String>>,
     #[serde(skip)]
-    pub prompt_tx: Option<flume::Sender<String>>,
+    pub prompt_tx: Option<flume::Sender<SubagentPrompt>>,
 }
 
 #[derive(Debug, Clone)]

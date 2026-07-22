@@ -21,7 +21,7 @@ use maki_agent::tools::{
 };
 use maki_agent::{
     Agent, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, Envelope, EventSender,
-    History, SubagentInfo, ToolDoneEvent,
+    History, SubagentInfo, SubagentPrompt, ToolDoneEvent,
 };
 use maki_lua_macro::{lua_class, lua_fn, lua_table};
 use maki_providers::model::ModelTier;
@@ -477,7 +477,7 @@ async fn session(
     let sub_event_tx = EventSender::new(sub_tx, agent_ctx.event_tx.run_id());
     let parent_tx = agent_ctx.event_tx.clone();
     let (answer_tx, answer_rx) = flume::unbounded::<String>();
-    let (prompt_tx, prompt_rx) = flume::bounded::<String>(STEERING_QUEUE_CAPACITY);
+    let (prompt_tx, prompt_rx) = flume::bounded::<SubagentPrompt>(STEERING_QUEUE_CAPACITY);
     let progress = Arc::new(Progress::new(start));
 
     let subagent_info: Arc<OnceLock<SubagentInfo>> = Arc::new(OnceLock::new());
@@ -742,8 +742,8 @@ struct SessionState {
     child_cancel: maki_agent::cancel::CancelToken,
     answer_rx: Arc<AsyncMutex<flume::Receiver<String>>>,
     answer_tx: Option<flume::Sender<String>>,
-    prompt_rx: flume::Receiver<String>,
-    prompt_tx: Option<flume::Sender<String>>,
+    prompt_rx: flume::Receiver<SubagentPrompt>,
+    prompt_tx: Option<flume::Sender<SubagentPrompt>>,
     parent_cancels: Arc<CancelMap<String>>,
     /// Stable identity for UI, cancel, and history. Falls back to a synthetic
     /// id for workflow-mode sessions (no model-issued tool call exists).
@@ -783,19 +783,19 @@ impl SessionState {
 }
 
 struct PromptInterruptSource {
-    rx: flume::Receiver<String>,
+    rx: flume::Receiver<SubagentPrompt>,
     thinking: ThinkingConfig,
     fast: bool,
 }
 
 impl maki_agent::InterruptSource for PromptInterruptSource {
     fn poll(&self) -> Option<maki_agent::ExtractedCommand> {
-        self.rx.try_recv().ok().map(|message| {
+        self.rx.try_recv().ok().map(|prompt| {
             maki_agent::ExtractedCommand::Interrupt(
                 AgentInput {
-                    message,
+                    message: prompt.text,
                     mode: AgentMode::Build,
-                    images: Vec::new(),
+                    images: prompt.images,
                     preamble: Vec::new(),
                     thinking: self.thinking,
                     fast: self.fast,
@@ -865,7 +865,10 @@ async fn prompt(
         });
     }
 
-    let mut next_message = Some(message);
+    let mut next_message = Some(SubagentPrompt {
+        text: message,
+        images: Vec::new(),
+    });
     while let Some(message) = next_message.take() {
         let mut agent = Agent::new(
             s.params.clone(),
@@ -887,9 +890,9 @@ async fn prompt(
         .with_local_tools(Arc::clone(&s.local_tools));
 
         let input = AgentInput {
-            message,
+            message: message.text,
             mode: AgentMode::Build,
-            images: Vec::new(),
+            images: message.images,
             preamble: Vec::new(),
             thinking: s.thinking,
             fast: s.fast,
@@ -1174,13 +1177,18 @@ mod tests {
             thinking: ThinkingConfig::Budget(1234),
             fast: true,
         };
-        tx.send("steer".into()).unwrap();
+        tx.send(SubagentPrompt {
+            text: "steer".into(),
+            images: Vec::new(),
+        })
+        .unwrap();
 
         let Some(ExtractedCommand::Interrupt(input, _)) = source.poll() else {
             panic!("expected an interrupt command");
         };
 
         assert_eq!(input.message, "steer");
+        assert!(input.images.is_empty());
         assert!(matches!(input.thinking, ThinkingConfig::Budget(1234)));
         assert!(input.fast);
     }

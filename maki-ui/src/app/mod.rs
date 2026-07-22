@@ -54,7 +54,7 @@ use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use maki_agent::permissions::PermissionManager;
 use maki_agent::{
     AgentEvent, Envelope, ImageSource, McpConfigErrors, McpPromptInfo, McpSnapshotReader,
-    SubagentInfo, ToolOutput,
+    SubagentInfo, SubagentPrompt, ToolOutput,
 };
 use maki_config::UiConfig;
 use maki_lua::{EventHandle, HintReader, KeymapReader, LuaCommandReader};
@@ -98,7 +98,7 @@ const STEERING_BUSY_MSG: &str = "This agent is busy; try again in a moment";
 enum SubagentPromptError {
     Finished,
     Disconnected,
-    Full(String),
+    Full(Submission),
 }
 
 #[derive(Clone)]
@@ -193,7 +193,7 @@ pub struct App {
     pub(crate) restore_event_tx: Option<maki_agent::EventSender>,
     pub(super) restoring: Arc<AtomicBool>,
     subagent_answers: HashMap<String, flume::Sender<String>>,
-    subagent_prompts: HashMap<String, flume::Sender<String>>,
+    subagent_prompts: HashMap<String, flume::Sender<SubagentPrompt>>,
 }
 
 impl App {
@@ -396,7 +396,7 @@ impl App {
     fn send_subagent_prompt(
         &mut self,
         subagent_id: &str,
-        message: String,
+        sub: Submission,
     ) -> Result<(), SubagentPromptError> {
         let Some(&idx) = self.chat_index.get(subagent_id) else {
             return Err(SubagentPromptError::Disconnected);
@@ -408,12 +408,16 @@ impl App {
         let Some(tx) = self.subagent_prompts.get(subagent_id) else {
             return Err(SubagentPromptError::Disconnected);
         };
-        match tx.try_send(message.clone()) {
+        let prompt = SubagentPrompt {
+            text: sub.text.clone(),
+            images: sub.images.clone(),
+        };
+        match tx.try_send(prompt) {
             Ok(()) => {
-                self.chats[idx].show_user_message(message);
+                self.chats[idx].show_user_message(format_with_images(&sub.text, sub.images.len()));
                 Ok(())
             }
-            Err(flume::TrySendError::Full(_)) => Err(SubagentPromptError::Full(message)),
+            Err(flume::TrySendError::Full(_)) => Err(SubagentPromptError::Full(sub)),
             Err(flume::TrySendError::Disconnected(_)) => {
                 self.subagent_prompts.remove(subagent_id);
                 Err(SubagentPromptError::Disconnected)
@@ -421,12 +425,12 @@ impl App {
         }
     }
 
-    fn handle_subagent_prompt_result(&mut self, subagent_id: String, text: String) {
-        match self.send_subagent_prompt(&subagent_id, text) {
+    fn handle_subagent_prompt_result(&mut self, subagent_id: String, sub: Submission) {
+        match self.send_subagent_prompt(&subagent_id, sub) {
             Ok(()) => {}
-            Err(SubagentPromptError::Full(text)) => {
+            Err(SubagentPromptError::Full(sub)) => {
                 self.flash(STEERING_BUSY_MSG.into());
-                self.input_box.set_input(text);
+                self.input_box.set_submission(sub);
             }
             Err(SubagentPromptError::Finished) | Err(SubagentPromptError::Disconnected) => {
                 self.flash(STEERING_UNAVAILABLE_MSG.into());
@@ -923,7 +927,7 @@ impl App {
                 return vec![];
             }
             PendingInput::SubagentFollowUp { subagent_id } => {
-                self.handle_subagent_prompt_result(subagent_id, sub.text);
+                self.handle_subagent_prompt_result(subagent_id, sub);
                 return vec![];
             }
             PendingInput::None => {}
@@ -935,7 +939,7 @@ impl App {
             let Some(tool_use_id) = self.chats[self.active_chat].tool_use_id.clone() else {
                 return vec![];
             };
-            self.handle_subagent_prompt_result(tool_use_id, sub.text);
+            self.handle_subagent_prompt_result(tool_use_id, sub);
             return vec![];
         }
         if sub.is_empty() {

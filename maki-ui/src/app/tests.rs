@@ -109,7 +109,7 @@ fn subagent_info_with_channels(
     _parent_id: &str,
     name: &str,
     answer_tx: Option<flume::Sender<String>>,
-    prompt_tx: Option<flume::Sender<String>>,
+    prompt_tx: Option<flume::Sender<SubagentPrompt>>,
 ) -> SubagentInfo {
     SubagentInfo {
         parent_tool_use_id: session_id.into(),
@@ -865,7 +865,7 @@ fn picker_navigate_to_subagent_then_type_routes_prompt_to_subagent() {
     let mut app = test_app();
     app.status = Status::Streaming;
     app.run_id = 1;
-    let (prompt_tx, prompt_rx) = flume::bounded::<String>(32);
+    let (prompt_tx, prompt_rx) = flume::bounded::<SubagentPrompt>(32);
     app.update(Msg::Agent(Box::new(Envelope {
         event: AgentEvent::TextDelta { text: "x".into() },
         subagent: Some(subagent_info_with_channels(
@@ -888,7 +888,7 @@ fn picker_navigate_to_subagent_then_type_routes_prompt_to_subagent() {
     app.update(Msg::Key(key(KeyCode::Char('h'))));
     app.update(Msg::Key(key(KeyCode::Enter)));
 
-    assert_eq!(prompt_rx.try_recv().unwrap(), "h");
+    assert_eq!(prompt_rx.try_recv().unwrap().text, "h");
     assert_eq!(app.chats[1].last_message_text(), "h");
     assert_eq!(app.chats[1].last_message_role(), Some(&DisplayRole::User));
 }
@@ -3210,7 +3210,7 @@ fn typing_in_running_subagent_routes_prompt_to_that_agent() {
     let mut app = test_app();
     app.status = Status::Streaming;
     app.run_id = 1;
-    let (prompt_tx, prompt_rx) = flume::bounded::<String>(32);
+    let (prompt_tx, prompt_rx) = flume::bounded::<SubagentPrompt>(32);
     app.update(Msg::Agent(Box::new(Envelope {
         event: AgentEvent::TextDelta {
             text: "running".into(),
@@ -3236,7 +3236,7 @@ fn typing_in_running_subagent_routes_prompt_to_that_agent() {
     app.update(Msg::Key(key(KeyCode::Char('w'))));
     app.update(Msg::Key(key(KeyCode::Enter)));
 
-    assert_eq!(prompt_rx.try_recv().unwrap(), "follow");
+    assert_eq!(prompt_rx.try_recv().unwrap().text, "follow");
 }
 
 #[test]
@@ -3244,7 +3244,7 @@ fn pasting_in_running_subagent_routes_prompt_to_that_agent() {
     let mut app = test_app();
     app.status = Status::Streaming;
     app.run_id = 1;
-    let (prompt_tx, prompt_rx) = flume::bounded::<String>(32);
+    let (prompt_tx, prompt_rx) = flume::bounded::<SubagentPrompt>(32);
     app.update(Msg::Agent(Box::new(Envelope {
         event: AgentEvent::TextDelta {
             text: "running".into(),
@@ -3263,7 +3263,7 @@ fn pasting_in_running_subagent_routes_prompt_to_that_agent() {
     app.update(Msg::Paste("pasted follow-up".into()));
     app.update(Msg::Key(key(KeyCode::Enter)));
 
-    assert_eq!(prompt_rx.try_recv().unwrap(), "pasted follow-up");
+    assert_eq!(prompt_rx.try_recv().unwrap().text, "pasted follow-up");
     assert_eq!(app.chats[1].last_message_text(), "pasted follow-up");
     assert_eq!(app.chats[1].last_message_role(), Some(&DisplayRole::User));
 }
@@ -3273,7 +3273,7 @@ fn typing_in_finished_subagent_flashes_explanation() {
     let mut app = test_app();
     app.status = Status::Streaming;
     app.run_id = 1;
-    let (prompt_tx, prompt_rx) = flume::bounded::<String>(32);
+    let (prompt_tx, prompt_rx) = flume::bounded::<SubagentPrompt>(32);
     app.update(subagent_msg(
         AgentEvent::TextDelta {
             text: "running".into(),
@@ -3303,7 +3303,7 @@ fn subagent_prompt_queue_full_restores_input_and_flashes_busy() {
     let mut app = test_app();
     app.status = Status::Streaming;
     app.run_id = 1;
-    let (prompt_tx, prompt_rx) = flume::bounded::<String>(1);
+    let (prompt_tx, prompt_rx) = flume::bounded::<SubagentPrompt>(1);
     let fill_tx = prompt_tx.clone();
     let info = subagent_info_with_channels("task1", "task1", "research", None, Some(prompt_tx));
     app.handle_agent_event(Envelope {
@@ -3312,14 +3312,19 @@ fn subagent_prompt_queue_full_restores_input_and_flashes_busy() {
         run_id: 1,
     });
     app.active_chat = 1;
-    fill_tx.try_send("fill".into()).unwrap();
+    fill_tx
+        .try_send(SubagentPrompt {
+            text: "fill".into(),
+            images: Vec::new(),
+        })
+        .unwrap();
 
     app.input_box.set_input("hi".into());
     app.update(Msg::Key(key(KeyCode::Enter)));
 
     assert_eq!(app.status_bar.flash_text(), Some(STEERING_BUSY_MSG));
     assert_eq!(app.input_box.buffer.value(), "hi");
-    assert_eq!(prompt_rx.try_recv().unwrap(), "fill");
+    assert_eq!(prompt_rx.try_recv().unwrap().text, "fill");
     assert!(prompt_rx.try_recv().is_err());
 }
 
@@ -3328,7 +3333,7 @@ fn subagent_prompt_disconnected_removes_sender_and_flashes_unavailable() {
     let mut app = test_app();
     app.status = Status::Streaming;
     app.run_id = 1;
-    let (prompt_tx, _prompt_rx) = flume::bounded::<String>(1);
+    let (prompt_tx, _prompt_rx) = flume::bounded::<SubagentPrompt>(1);
     drop(_prompt_rx);
     let info = subagent_info_with_channels("task1", "task1", "research", None, Some(prompt_tx));
     app.handle_agent_event(Envelope {
@@ -3399,7 +3404,7 @@ fn permission_answer_to_disconnected_subagent_does_not_fall_back_to_main() {
 
 #[test]
 fn cancel_subagent_removes_prompt_sender() {
-    let (prompt_tx, _prompt_rx) = flume::bounded::<String>(2);
+    let (prompt_tx, _prompt_rx) = flume::bounded::<SubagentPrompt>(2);
     let mut app = test_app();
     app.status = Status::Streaming;
     app.run_id = 1;
@@ -3422,4 +3427,37 @@ fn cancel_subagent_removes_prompt_sender() {
     assert!(app.chats[1].is_finished());
     assert!(!app.subagent_prompts.contains_key("task1"));
     assert!(!app.subagent_answers.contains_key("task1"));
+}
+
+#[test]
+fn subagent_prompt_carries_images() {
+    let mut app = test_app();
+    app.status = Status::Streaming;
+    app.run_id = 1;
+    let (prompt_tx, prompt_rx) = flume::bounded::<SubagentPrompt>(32);
+    app.update(Msg::Agent(Box::new(Envelope {
+        event: AgentEvent::TextDelta {
+            text: "running".into(),
+        },
+        subagent: Some(subagent_info_with_channels(
+            "task1",
+            "task1",
+            "research",
+            None,
+            Some(prompt_tx),
+        )),
+        run_id: 1,
+    })));
+    app.active_chat = 1;
+
+    let img = ImageSource::new(ImageMediaType::Png, Arc::from("dGVzdA=="));
+    app.input_box.attach_image(img);
+    app.update(Msg::Key(key(KeyCode::Char('d'))));
+    app.update(Msg::Key(key(KeyCode::Enter)));
+
+    let prompt = prompt_rx.try_recv().unwrap();
+    assert_eq!(prompt.text, "d");
+    assert_eq!(prompt.images.len(), 1);
+    assert_eq!(app.chats[1].last_message_text(), "d [1 image]");
+    assert_eq!(app.chats[1].last_message_role(), Some(&DisplayRole::User));
 }

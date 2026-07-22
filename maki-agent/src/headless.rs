@@ -258,7 +258,8 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
                 },
             )
             .with_loaded_instructions(instructions.loaded)
-            .with_mcp(params.mcp_handle);
+            .with_mcp(params.mcp_handle)
+            .with_excluded_tools(&params.excluded_tools);
 
             let result = agent
                 .run(AgentInput {
@@ -472,7 +473,8 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                 .with_loaded_instructions(instructions.loaded.clone())
                 .with_user_response_rx(Arc::clone(&answer_rx))
                 .with_cancel(cancel)
-                .with_mcp(params.mcp_handle.clone());
+                .with_mcp(params.mcp_handle.clone())
+                .with_excluded_tools(&params.excluded_tools);
 
                 let result = agent.run(input).await;
                 drop(agent);

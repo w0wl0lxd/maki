@@ -16,7 +16,11 @@ use super::tool_dispatch::{self, RecentCalls};
 use crate::cancel::{CancelMap, CancelToken};
 use crate::mcp::McpHandle;
 use crate::permissions::PermissionManager;
-use crate::tools::{Deadline, FileReadTracker, LocalTools, ToolAudience, ToolContext};
+use crate::template;
+use crate::tools::{
+    Deadline, DescriptionContext, FileReadTracker, LocalTools, ToolAudience, ToolContext,
+    ToolFilter,
+};
 use crate::{
     AgentConfig, AgentError, AgentEvent, AgentInput, AgentMode, EventSender, ExtractedCommand,
     InterruptSource, TurnCompleteEvent,
@@ -107,6 +111,7 @@ pub struct Agent<'h> {
     workflow: bool,
     local_tools: LocalTools,
     activated_tools: std::collections::HashSet<Arc<str>>,
+    excluded_tools: Vec<&'static str>,
 }
 
 impl<'h> Agent<'h> {
@@ -146,6 +151,7 @@ impl<'h> Agent<'h> {
             workflow: false,
             local_tools: LocalTools::default(),
             activated_tools: std::collections::HashSet::new(),
+            excluded_tools: Vec::new(),
         }
     }
 
@@ -177,9 +183,37 @@ impl<'h> Agent<'h> {
         self
     }
 
+    pub fn with_excluded_tools(mut self, excluded: &[&'static str]) -> Self {
+        self.excluded_tools = excluded.to_vec();
+        self
+    }
+
     pub fn with_loaded_instructions(mut self, loaded: LoadedInstructions) -> Self {
         self.loaded_instructions = loaded;
         self
+    }
+
+    fn rebuild_tools(&self) -> Value {
+        let vars = template::env_vars();
+        let filter = ToolFilter::from_config(&self.config, &self.model, &self.excluded_tools);
+        let ctx = DescriptionContext {
+            filter: &filter,
+            audience: self.audience,
+            workflow: self.workflow,
+        };
+        let mode = &self.config.dynamic_tools.default_mode;
+        let additional: Vec<Arc<str>> = self.activated_tools.iter().cloned().collect();
+        let allowed = self.registry.active_tools_for_mode(mode, &additional);
+        let mut tools = self.registry.definitions_filtered(
+            &vars,
+            &ctx,
+            self.model.supports_tool_examples(),
+            &allowed,
+        );
+        if let Some(ref mcp) = self.mcp {
+            mcp.extend_tools(&mut tools);
+        }
+        tools
     }
 
     pub async fn run(&mut self, input: AgentInput) -> Result<(), AgentError> {
@@ -231,6 +265,9 @@ impl<'h> Agent<'h> {
     async fn turn(&mut self) -> Result<TurnOutcome, AgentError> {
         if self.cancel.is_cancelled() {
             return Err(AgentError::Cancelled);
+        }
+        if self.config.dynamic_tools.enabled {
+            self.tools = self.rebuild_tools();
         }
         let response = match stream_with_retry(
             &*self.provider,

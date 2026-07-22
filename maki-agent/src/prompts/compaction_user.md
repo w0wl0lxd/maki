@@ -1,24 +1,24 @@
-Provide a detailed summary for continuing our conversation above.
-Focus on information that would be helpful for continuing the conversation, including what we did, what we're doing, which files we're working on, and what we're going to do next.
+Provide detailed summary for continuing conversation.
+Focus on: what we did, what we're doing, which files we're working on, what's next.
 
-Stick to this template:
+Stick to template:
 ---
 ## Goal
-[What goal(s) is the user trying to accomplish?]
+[What goal(s) is user trying to accomplish?]
 
 ## Instructions
-- [Important instructions the user gave that are relevant]
-- [If there is a plan or spec, include information about it]
+- [Important user instructions relevant to continuation]
+- [If plan/spec exists, include info]
 
 ## Discoveries
-[Notable things learned during this conversation]
+[Notable things learned during conversation]
 
 ## Accomplished
-[What work has been completed, what is still in progress, what is left?]
+[Work completed, in progress, left]
 
 ## Relevant files / directories
-[Structured list of relevant files that have been read, edited, or created]
+[Structured list of relevant files read/edited/created]
 
 ## Todo list
-[If a todo list was in use, repeat it here verbatim with each item's current status; it must be kept up to date with todo_write after continuing. Otherwise omit this section]
+[If todo list in use, repeat verbatim with current status; must stay updated via todo_write after continuing. Otherwise omit]
 ---

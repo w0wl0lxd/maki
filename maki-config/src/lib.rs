@@ -453,6 +453,14 @@ pub struct AgentFileConfig {
     pub max_continuation_turns: Option<u32>,
     pub compaction_buffer: Option<CompactionBuffer>,
     pub mcp_tool_desc_max_chars: Option<usize>,
+    pub dynamic_tools: Option<DynamicToolFileConfig>,
+}
+
+#[derive(Deserialize, Default, Debug)]
+#[serde(default, deny_unknown_fields)]
+pub struct DynamicToolFileConfig {
+    pub enabled: Option<bool>,
+    pub default_mode: Option<String>,
 }
 
 impl AgentFileConfig {
@@ -466,6 +474,18 @@ impl AgentFileConfig {
             compaction_buffer,
             mcp_tool_desc_max_chars
         );
+        match (self.dynamic_tools.as_mut(), overlay.dynamic_tools) {
+            (Some(base), Some(over)) => {
+                if over.enabled.is_some() {
+                    base.enabled = over.enabled;
+                }
+                if over.default_mode.is_some() {
+                    base.default_mode = over.default_mode;
+                }
+            }
+            (None, Some(over)) => self.dynamic_tools = Some(over),
+            _ => {}
+        }
     }
 }
 
@@ -982,10 +1002,49 @@ pub struct AgentConfig {
 
     #[config(skip, default = "Vec::new()")]
     pub disabled_tools: Vec<String>,
+
+    #[config(skip, default = "DynamicToolConfig::default()")]
+    pub dynamic_tools: DynamicToolConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ConfigSection)]
+#[config(section = "dynamic_tools", fields_only)]
+pub struct DynamicToolConfig {
+    #[config(
+        ty = "bool",
+        default = "false",
+        desc = "Enable mode-based dynamic tool loading"
+    )]
+    pub enabled: bool,
+
+    #[config(
+        ty = "String",
+        default = "\"default\"",
+        desc = "Default mode for tool filtering (e.g. \"default\", \"research\", \"build\")"
+    )]
+    pub default_mode: String,
+}
+
+impl Default for DynamicToolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_mode: "default".to_string(),
+        }
+    }
 }
 
 impl AgentConfig {
     fn from_file(file: AgentFileConfig, no_rtk: bool, disabled_tools: Vec<String>) -> Self {
+        let dynamic_tools = if let Some(dt) = file.dynamic_tools {
+            DynamicToolConfig {
+                enabled: dt.enabled.unwrap_or(false),
+                default_mode: dt.default_mode.unwrap_or_else(|| "default".to_string()),
+            }
+        } else {
+            DynamicToolConfig::default()
+        };
+
         Self {
             no_rtk,
             max_output_bytes: file.max_output_bytes.unwrap_or(DEFAULT_MAX_OUTPUT_BYTES),
@@ -1000,6 +1059,7 @@ impl AgentConfig {
             max_turns: None,
             allowed_tools: Vec::new(),
             disabled_tools,
+            dynamic_tools,
         }
     }
 }

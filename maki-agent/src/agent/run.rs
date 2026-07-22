@@ -106,6 +106,7 @@ pub struct Agent<'h> {
     audience: ToolAudience,
     workflow: bool,
     local_tools: LocalTools,
+    activated_tools: std::collections::HashSet<Arc<str>>,
 }
 
 impl<'h> Agent<'h> {
@@ -144,6 +145,7 @@ impl<'h> Agent<'h> {
             audience: params.audience,
             workflow: false,
             local_tools: LocalTools::default(),
+            activated_tools: std::collections::HashSet::new(),
         }
     }
 
@@ -378,6 +380,18 @@ impl<'h> Agent<'h> {
     async fn process_tool_calls(&mut self, response: StreamResponse) -> Result<(), AgentError> {
         self.post_tool_empty_retried = false;
         let ctx = self.tool_context();
+
+        if self.config.dynamic_tools.enabled {
+            for call in &response.message.content {
+                if let maki_providers::ContentBlock::ToolUse { name, input, .. } = call
+                    && name == "activate_tool"
+                    && let Some(tool_name) = input.get("tool_name").and_then(|v| v.as_str())
+                {
+                    self.activated_tools.insert(Arc::from(tool_name));
+                }
+            }
+        }
+
         tool_dispatch::process_tool_calls(
             response,
             &mut self.recent_calls,
@@ -608,12 +622,20 @@ mod tests {
         provider: MockProvider,
         history: &mut History,
     ) -> (Agent<'_>, flume::Receiver<Envelope>) {
+        make_agent_with_config(provider, history, AgentConfig::default())
+    }
+
+    fn make_agent_with_config(
+        provider: MockProvider,
+        history: &mut History,
+        config: AgentConfig,
+    ) -> (Agent<'_>, flume::Receiver<Envelope>) {
         let (raw_tx, event_rx) = flume::unbounded();
         let agent = Agent::new(
             AgentParams {
                 provider: Arc::new(provider),
                 model: default_model(),
-                config: AgentConfig::default(),
+                config,
                 tool_output_lines: ToolOutputLines::default(),
                 permissions: Arc::new(PermissionManager::new(
                     maki_config::PermissionsConfig {
@@ -980,6 +1002,48 @@ mod tests {
                 })
                 .expect("expected Done event");
             assert_eq!(done, expected_turns);
+        });
+    }
+
+    #[test]
+    fn activate_tool_adds_to_activated_set() {
+        smol::block_on(async {
+            let mut config = AgentConfig::default();
+            config.dynamic_tools.enabled = true;
+
+            let activate_response = StreamResponse {
+                message: Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: "t1".into(),
+                        name: "activate_tool".into(),
+                        input: serde_json::json!({"tool_name": "write_tool"}),
+                    }],
+                    ..Default::default()
+                },
+                usage: TokenUsage::default(),
+                stop_reason: Some(StopReason::EndTurn),
+            };
+
+            let responses = vec![activate_response, text_response(StopReason::EndTurn)];
+
+            let mut history = History::new(Vec::new());
+            let (mut agent, _event_rx) =
+                make_agent_with_config(MockProvider::new(responses), &mut history, config);
+
+            let input = AgentInput {
+                message: "activate write_tool".into(),
+                images: vec![],
+                mode: AgentMode::default(),
+                workflow: false,
+                thinking: maki_providers::ThinkingConfig::Off,
+                fast: false,
+                preamble: vec![],
+                prompt: None,
+            };
+
+            let _ = agent.run(input).await;
+            assert!(agent.activated_tools.contains(&Arc::from("write_tool")));
         });
     }
 }

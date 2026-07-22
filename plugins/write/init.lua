@@ -26,6 +26,7 @@ maki.api.register_tool({
   mutable_path = "path",
   permission_scopes = "path",
   audiences = { "main", "general_sub", "interpreter" },
+  modes = { "default", "build" },
   description = DESCRIPTION,
 
   schema = {

@@ -222,6 +222,7 @@ maki.api.register_prompt_hint({
 maki.api.register_tool({
   name = "read",
   kind = "read",
+  modes = { "default", "research", "build", "compact" },
   description = DESCRIPTION,
 
   schema = {

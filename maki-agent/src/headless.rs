@@ -109,6 +109,17 @@ struct AgentSetup {
     tools: Value,
 }
 
+struct ToolDefinitionsParams<'a> {
+    vars: &'a template::Vars,
+    model: &'a Model,
+    config: &'a AgentConfig,
+    excluded_tools: &'a [&'static str],
+    mcp_handle: Option<&'a McpHandle>,
+    workflow: bool,
+    registry: &'a ToolRegistry,
+    additional_active: &'a [Arc<str>],
+}
+
 fn setup(
     model: &Model,
     config: &AgentConfig,
@@ -118,15 +129,17 @@ fn setup(
 ) -> AgentSetup {
     let vars = template::env_vars();
     let instructions = agent::load_instructions(&vars.apply("{cwd}"));
-    let tools = tool_definitions(
-        &vars,
+    let params = ToolDefinitionsParams {
+        vars: &vars,
         model,
         config,
         excluded_tools,
         mcp_handle,
         workflow,
-        ToolRegistry::global(),
-    );
+        registry: ToolRegistry::global(),
+        additional_active: &[],
+    };
+    let tools = tool_definitions(&params);
 
     AgentSetup {
         vars,
@@ -135,24 +148,24 @@ fn setup(
     }
 }
 
-fn tool_definitions(
-    vars: &template::Vars,
-    model: &Model,
-    config: &AgentConfig,
-    excluded_tools: &[&'static str],
-    mcp_handle: Option<&McpHandle>,
-    workflow: bool,
-    registry: &ToolRegistry,
-) -> Value {
-    let filter = ToolFilter::from_config(config, model, excluded_tools);
+fn tool_definitions(params: &ToolDefinitionsParams) -> Value {
+    let filter = ToolFilter::from_config(params.config, params.model, params.excluded_tools);
     let ctx = DescriptionContext {
         filter: &filter,
         audience: ToolAudience::MAIN,
-        workflow,
+        workflow: params.workflow,
     };
-    let mut tools = registry.definitions(vars, &ctx, model.supports_tool_examples());
 
-    if let Some(handle) = mcp_handle {
+    let tools = if params.config.dynamic_tools.enabled {
+        let mode = &params.config.dynamic_tools.default_mode;
+        let allowed = params.registry.active_tools_for_mode(mode, params.additional_active);
+        params.registry.definitions_filtered(params.vars, &ctx, params.model.supports_tool_examples(), &allowed)
+    } else {
+        params.registry.definitions(params.vars, &ctx, params.model.supports_tool_examples())
+    };
+
+    let mut tools = tools;
+    if let Some(handle) = params.mcp_handle {
         handle.extend_tools(&mut tools);
     }
 
@@ -375,15 +388,17 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                     match provider::from_model_async(&mut new_model, params.timeouts).await {
                         Ok(p) => {
                             provider = Arc::from(p);
-                            tools = tool_definitions(
-                                &vars,
-                                &new_model,
-                                &params.config,
-                                &params.excluded_tools,
-                                params.mcp_handle.as_ref(),
-                                params.workflow,
-                                ToolRegistry::global(),
-                            );
+                            let tool_params = ToolDefinitionsParams {
+                                vars: &vars,
+                                model: &new_model,
+                                config: &params.config,
+                                excluded_tools: &params.excluded_tools,
+                                mcp_handle: params.mcp_handle.as_ref(),
+                                workflow: params.workflow,
+                                registry: ToolRegistry::global(),
+                                additional_active: &[],
+                            };
+                            tools = tool_definitions(&tool_params);
                             model = new_model;
                         }
                         Err(e) => {

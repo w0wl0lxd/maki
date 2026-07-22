@@ -252,6 +252,7 @@ local opts = maki.api.register_options(output_limits.extend({
 maki.api.register_tool({
   name = "bash",
   kind = "execute",
+  modes = { "default", "build", "compact" },
   description = description,
   schema = {
     type = "object",

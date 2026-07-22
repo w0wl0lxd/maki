@@ -1,9 +1,10 @@
 //! `maki.agent` exposes subagent primitives to Lua plugins. Policy (retries,
 //! validation, concurrency) lives in the task plugin, not here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::pin::pin;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -21,7 +22,7 @@ use maki_agent::tools::{
 };
 use maki_agent::{
     Agent, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, Envelope, EventSender,
-    History, McpSession, SubagentInfo, ToolDoneEvent,
+    History, McpSession, SubagentInfo, SubagentPrompt, ToolDoneEvent,
 };
 use maki_lua_macro::{lua_class, lua_fn, lua_table};
 use maki_providers::model::ModelTier;
@@ -39,6 +40,9 @@ use crate::api::util::ctx::{AgentContext, LuaCtx};
 
 const SESSION_CLOSED_ERR: &str = "session closed";
 const DEFAULT_SESSION_AUDIENCE: ToolAudience = ToolAudience::GENERAL_SUB;
+const PROGRESS_MAX_RECENT: usize = 5;
+const PROGRESS_TIMEOUT_MS: u64 = 500;
+const STEERING_QUEUE_CAPACITY: usize = 32;
 
 fn resolve_model_from_ctx(ctx: &AgentContext, tier: Option<&str>) -> Result<Model, String> {
     let Some(tier_str) = tier else {
@@ -460,10 +464,13 @@ async fn session(
     };
 
     let session_id = MakiId::generate();
+    let start = Instant::now();
     let (sub_tx, sub_rx) = flume::unbounded::<Envelope>();
     let sub_event_tx = EventSender::new(sub_tx, agent_ctx.event_tx.run_id());
     let parent_tx = agent_ctx.event_tx.clone();
     let (answer_tx, answer_rx) = flume::unbounded::<String>();
+    let (prompt_tx, prompt_rx) = flume::bounded::<SubagentPrompt>(STEERING_QUEUE_CAPACITY);
+    let progress = Arc::new(Progress::new(start));
 
     let subagent_info: Arc<OnceLock<SubagentInfo>> = Arc::new(OnceLock::new());
     let total_input = Arc::new(AtomicU32::new(0));
@@ -473,6 +480,7 @@ async fn session(
         let info = Arc::clone(&subagent_info);
         let ti = Arc::clone(&total_input);
         let to = Arc::clone(&total_output);
+        let progress = Arc::clone(&progress);
         let parent_tx = parent_tx.clone();
         smol::spawn(async move {
             while let Ok(mut envelope) = sub_rx.recv_async().await {
@@ -481,6 +489,12 @@ async fn session(
                         ti.fetch_add(usage.total_input(), Ordering::Relaxed);
                         to.fetch_add(usage.output, Ordering::Relaxed);
                         continue;
+                    }
+                    AgentEvent::ToolStart(e) => {
+                        progress.set_current(&e.tool);
+                    }
+                    AgentEvent::ToolDone(e) => {
+                        progress.add_recent(&e.tool);
                     }
                     AgentEvent::Error { .. }
                     | AgentEvent::ToolOutput { .. }
@@ -538,6 +552,8 @@ async fn session(
         child_cancel,
         answer_rx: Arc::new(AsyncMutex::new(answer_rx)),
         answer_tx: Some(answer_tx),
+        prompt_rx,
+        prompt_tx: Some(prompt_tx),
         parent_cancels: Arc::clone(&agent_ctx.subagent_cancels),
         ui_id,
         parent_event_tx: parent_tx,
@@ -546,12 +562,14 @@ async fn session(
         name,
         total_input,
         total_output,
-        start: Instant::now(),
+        start,
         closed: false,
+        progress: Arc::clone(&progress),
     };
 
     let sess = lua.create_userdata(LuaSession {
         inner: Arc::new(AsyncMutex::new(state)),
+        progress,
     })?;
     Ok((Some(sess), None))
 }
@@ -646,6 +664,68 @@ async fn dispatch_racing_live(
     }
 }
 
+struct ProgressState {
+    current: Option<String>,
+    recent: VecDeque<String>,
+    done: bool,
+    completed_count: u64,
+}
+
+struct Progress {
+    start: Instant,
+    state: Mutex<ProgressState>,
+    tx: flume::Sender<()>,
+    rx: flume::Receiver<()>,
+}
+
+impl Progress {
+    fn new(start: Instant) -> Self {
+        let (tx, rx) = flume::unbounded();
+        Self {
+            start,
+            state: Mutex::new(ProgressState {
+                current: None,
+                recent: VecDeque::new(),
+                done: false,
+                completed_count: 0,
+            }),
+            tx,
+            rx,
+        }
+    }
+
+    fn notify(&self) {
+        let _ = self.tx.send(());
+    }
+
+    fn set_current(&self, tool: &str) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.current = Some(tool.to_owned());
+        drop(state);
+        self.notify();
+    }
+
+    fn add_recent(&self, tool: &str) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.current = None;
+        state.completed_count += 1;
+        if state.recent.len() >= PROGRESS_MAX_RECENT {
+            state.recent.pop_front();
+        }
+        state.recent.push_back(tool.to_owned());
+        drop(state);
+        self.notify();
+    }
+
+    fn set_done(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.done = true;
+        state.current = None;
+        drop(state);
+        self.notify();
+    }
+}
+
 struct SessionState {
     params: AgentParams,
     system: String,
@@ -660,6 +740,8 @@ struct SessionState {
     child_cancel: maki_agent::cancel::CancelToken,
     answer_rx: Arc<AsyncMutex<flume::Receiver<String>>>,
     answer_tx: Option<flume::Sender<String>>,
+    prompt_rx: flume::Receiver<SubagentPrompt>,
+    prompt_tx: Option<flume::Sender<SubagentPrompt>>,
     parent_cancels: Arc<CancelMap<String>>,
     /// Stable identity for UI, cancel, and history. Falls back to a synthetic
     /// id for workflow-mode sessions (no model-issued tool call exists).
@@ -672,6 +754,7 @@ struct SessionState {
     total_output: Arc<AtomicU32>,
     start: Instant,
     closed: bool,
+    progress: Arc<Progress>,
 }
 
 impl SessionState {
@@ -680,6 +763,7 @@ impl SessionState {
             return;
         }
         self.closed = true;
+        self.progress.set_done();
         self.parent_cancels.remove(&self.ui_id);
         let messages = std::mem::replace(&mut self.history, History::new(Vec::new())).into_vec();
         let _ = self.parent_event_tx.send(AgentEvent::SubagentHistory {
@@ -696,8 +780,35 @@ impl SessionState {
     }
 }
 
+struct PromptInterruptSource {
+    rx: flume::Receiver<SubagentPrompt>,
+    thinking: ThinkingConfig,
+    fast: bool,
+}
+
+impl maki_agent::InterruptSource for PromptInterruptSource {
+    fn poll(&self) -> Option<maki_agent::ExtractedCommand> {
+        self.rx.try_recv().ok().map(|prompt| {
+            maki_agent::ExtractedCommand::Interrupt(
+                AgentInput {
+                    message: prompt.text,
+                    mode: AgentMode::Build,
+                    images: prompt.images,
+                    preamble: Vec::new(),
+                    thinking: self.thinking,
+                    fast: self.fast,
+                    workflow: false,
+                    prompt: None,
+                },
+                1,
+            )
+        })
+    }
+}
+
 struct LuaSession {
     inner: Arc<AsyncMutex<SessionState>>,
+    progress: Arc<Progress>,
 }
 
 impl Drop for LuaSession {
@@ -748,38 +859,53 @@ async fn prompt(
             prompt: Some(message.clone()),
             model: Some(s.params.model.spec()),
             answer_tx: s.answer_tx.take(),
+            prompt_tx: s.prompt_tx.take(),
         });
     }
 
-    let mut agent = Agent::new(
-        s.params.clone(),
-        AgentRunParams {
-            history: &mut s.history,
-            system: s.system.clone(),
-            event_tx: s.sub_event_tx.clone(),
-            tools: s.tools.clone(),
-        },
-    )
-    .with_user_response_rx(Arc::clone(&s.answer_rx))
-    .with_cancel(s.child_cancel.clone())
-    .with_mcp(s.mcp.clone())
-    .with_local_tools(Arc::clone(&s.local_tools));
-
-    let input = AgentInput {
-        message,
-        mode: AgentMode::Build,
+    let mut next_message = Some(SubagentPrompt {
+        text: message,
         images: Vec::new(),
-        preamble: Vec::new(),
-        thinking: s.thinking,
-        fast: s.fast,
-        workflow: false,
-        prompt: None,
-    };
-    let result = agent.run(input).await;
-    drop(agent);
-    if let Err(e) = result {
-        return Ok((None, Some(e.to_string())));
+    });
+    while let Some(message) = next_message.take() {
+        let mut agent = Agent::new(
+            s.params.clone(),
+            AgentRunParams {
+                history: &mut s.history,
+                system: s.system.clone(),
+                event_tx: s.sub_event_tx.clone(),
+                tools: s.tools.clone(),
+            },
+        )
+        .with_user_response_rx(Arc::clone(&s.answer_rx))
+        .with_interrupt_source(Arc::new(PromptInterruptSource {
+            rx: s.prompt_rx.clone(),
+            thinking: s.thinking,
+            fast: s.fast,
+        }))
+        .with_cancel(s.child_cancel.clone())
+        .with_mcp(s.mcp.clone())
+        .with_local_tools(Arc::clone(&s.local_tools));
+
+        let input = AgentInput {
+            message: message.text,
+            mode: AgentMode::Build,
+            images: message.images,
+            preamble: Vec::new(),
+            thinking: s.thinking,
+            fast: s.fast,
+            workflow: false,
+            prompt: None,
+        };
+        let result = agent.run(input).await;
+        drop(agent);
+        if let Err(e) = result {
+            s.progress.set_done();
+            return Ok((None, Some(e.to_string())));
+        }
+        next_message = s.prompt_rx.try_recv().ok();
     }
+    s.progress.set_done();
 
     let text = s
         .history
@@ -800,6 +926,42 @@ async fn prompt(
     tbl.set("duration_ms", s.start.elapsed().as_millis() as u64)?;
     tbl.set("input_tokens", s.total_input.load(Ordering::Relaxed))?;
     tbl.set("output_tokens", s.total_output.load(Ordering::Relaxed))?;
+    Ok((Some(tbl), None))
+}
+
+/// Poll the session for a progress snapshot while a prompt is running.
+///
+/// Returns a table with:
+///   `elapsed_ms` (integer): time since the session was created.
+///   `current_tool` (string?): name of the tool currently running, if any.
+///   `recent_tools` (table): names of the last few finished tools, oldest first.
+///   `completed_count` (integer): total number of finished tools so far.
+///   `done` (bool): true once the prompt has completed.
+///
+/// The call returns at most every `PROGRESS_TIMEOUT_MS` milliseconds, or
+/// immediately when a tool starts or finishes.
+#[lua_fn]
+async fn get_progress(lua: Lua, this: mlua::UserDataRef<LuaSession>) -> LuaResult<Pair<Table>> {
+    let progress = Arc::clone(&this.progress);
+    let notify = pin!(progress.rx.recv_async());
+    let timeout = pin!(smol::Timer::after(Duration::from_millis(
+        PROGRESS_TIMEOUT_MS
+    )));
+    let _ = select(notify, timeout).await;
+
+    let state = progress.state.lock().unwrap_or_else(|e| e.into_inner());
+    let elapsed = progress.start.elapsed().as_millis() as u64;
+    let tbl = lua.create_table()?;
+    tbl.set("elapsed_ms", elapsed)?;
+    tbl.set("current_tool", state.current.as_deref())?;
+    tbl.set("done", state.done)?;
+    tbl.set("completed_count", state.completed_count)?;
+
+    let recent = lua.create_table()?;
+    for (i, tool) in state.recent.iter().enumerate() {
+        recent.set(i + 1, tool.as_str())?;
+    }
+    tbl.set("recent_tools", recent)?;
     Ok((Some(tbl), None))
 }
 
@@ -824,7 +986,7 @@ lua_class! {
     /// `:prompt()`. The session remembers previous turns, so you can have
     /// a multi-step conversation. Call `:close()` when you are done, or let
     /// garbage collection handle it.
-    "maki.agent.Session" => LuaSession, SESSION_DOCS [prompt, close]
+    "maki.agent.Session" => LuaSession, SESSION_DOCS [prompt, close, get_progress]
 }
 
 /// Weak Lua ref avoids a reference cycle when the session is stored in userdata.
@@ -844,6 +1006,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use maki_agent::{ExtractedCommand, InterruptSource};
 
     fn call(src: &str, input: JsonValue) -> Result<String, String> {
         let lua = Lua::new();
@@ -870,5 +1033,161 @@ mod tests {
         assert!(raised.contains("boom"), "got: {raised}");
         let wrong = call("function() return 42 end", input).unwrap_err();
         assert!(wrong.contains("expected string"), "got: {wrong}");
+    }
+
+    #[test]
+    fn progress_initial_state() {
+        let p = Progress::new(Instant::now());
+        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(state.current.is_none(), "no tool running initially");
+        assert!(state.recent.is_empty(), "no completed tools initially");
+        assert!(!state.done, "not done initially");
+        assert_eq!(state.completed_count, 0);
+    }
+
+    #[test]
+    fn progress_set_current() {
+        let p = Progress::new(Instant::now());
+        p.set_current("bash");
+        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.current.as_deref(), Some("bash"));
+        assert!(state.recent.is_empty());
+        assert!(!state.done);
+        assert_eq!(state.completed_count, 0);
+    }
+
+    #[test]
+    fn progress_set_current_replaces_previous() {
+        let p = Progress::new(Instant::now());
+        p.set_current("bash");
+        p.set_current("glob");
+        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.current.as_deref(), Some("glob"));
+    }
+
+    #[test]
+    fn progress_add_recent_clears_current() {
+        let p = Progress::new(Instant::now());
+        p.set_current("bash");
+        p.add_recent("bash");
+        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(state.current.is_none(), "current cleared after completion");
+        assert_eq!(state.completed_count, 1);
+        assert_eq!(state.recent.len(), 1);
+        assert_eq!(state.recent[0], "bash");
+    }
+
+    #[test]
+    fn progress_add_recent_orders_by_completion() {
+        let p = Progress::new(Instant::now());
+        p.set_current("bash");
+        p.add_recent("bash");
+        p.set_current("grep");
+        p.add_recent("grep");
+        p.set_current("glob");
+        p.add_recent("glob");
+        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.completed_count, 3);
+        assert_eq!(state.recent.len(), 3);
+        assert_eq!(state.recent[0], "bash");
+        assert_eq!(state.recent[1], "grep");
+        assert_eq!(state.recent[2], "glob");
+    }
+
+    #[test]
+    fn progress_add_recent_caps_at_max() {
+        let p = Progress::new(Instant::now());
+        for i in 0..PROGRESS_MAX_RECENT + 3 {
+            p.set_current(&format!("tool_{i}"));
+            p.add_recent(&format!("tool_{i}"));
+        }
+        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.completed_count, (PROGRESS_MAX_RECENT + 3) as u64);
+        assert_eq!(state.recent.len(), PROGRESS_MAX_RECENT);
+        assert_eq!(state.recent[0], "tool_3");
+        assert_eq!(state.recent[PROGRESS_MAX_RECENT - 1], "tool_7");
+    }
+
+    #[test]
+    fn progress_set_done() {
+        let p = Progress::new(Instant::now());
+        p.set_current("bash");
+        p.set_done();
+        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(state.done);
+        assert!(state.current.is_none());
+    }
+
+    #[test]
+    fn progress_set_done_idempotent() {
+        let p = Progress::new(Instant::now());
+        p.set_done();
+        p.set_done();
+        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(state.done);
+    }
+
+    #[test]
+    fn progress_notify_sends_signal() {
+        let p = Progress::new(Instant::now());
+        assert!(p.rx.is_empty(), "no signal before notify");
+        p.notify();
+        assert!(!p.rx.is_empty(), "signal available after notify");
+    }
+
+    #[test]
+    fn progress_full_lifecycle() {
+        let p = Progress::new(Instant::now());
+        assert!(p.rx.is_empty());
+
+        p.set_current("write");
+        assert!(!p.rx.is_empty());
+
+        p.rx.drain();
+        p.add_recent("write");
+        assert!(!p.rx.is_empty());
+
+        p.rx.drain();
+        p.set_done();
+        assert!(!p.rx.is_empty());
+
+        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.completed_count, 1);
+        assert_eq!(state.recent.len(), 1);
+        assert!(state.done);
+    }
+
+    #[test]
+    fn progress_add_recent_without_current() {
+        let p = Progress::new(Instant::now());
+        p.add_recent("direct_complete");
+        let state = p.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(state.current.is_none());
+        assert_eq!(state.completed_count, 1);
+        assert_eq!(state.recent[0], "direct_complete");
+    }
+
+    #[test]
+    fn prompt_interrupt_source_preserves_session_thinking_and_fast() {
+        let (tx, rx) = flume::unbounded();
+        let source = PromptInterruptSource {
+            rx,
+            thinking: ThinkingConfig::Budget(1234),
+            fast: true,
+        };
+        tx.send(SubagentPrompt {
+            text: "steer".into(),
+            images: Vec::new(),
+        })
+        .unwrap();
+
+        let Some(ExtractedCommand::Interrupt(input, _)) = source.poll() else {
+            panic!("expected an interrupt command");
+        };
+
+        assert_eq!(input.message, "steer");
+        assert!(input.images.is_empty());
+        assert!(matches!(input.thinking, ThinkingConfig::Budget(1234)));
+        assert!(input.fast);
     }
 }

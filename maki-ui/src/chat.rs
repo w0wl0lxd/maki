@@ -44,6 +44,7 @@ pub struct Chat {
     pub token_usage: TokenUsage,
     pub context_size: u32,
     pub model_id: Option<String>,
+    pub tool_use_id: Option<String>,
     pending_turn_usage: Option<String>,
     messages_panel: MessagesPanel,
     finished: bool,
@@ -56,6 +57,7 @@ impl Chat {
             token_usage: TokenUsage::default(),
             context_size: 0,
             model_id: None,
+            tool_use_id: None,
             pending_turn_usage: None,
             messages_panel: MessagesPanel::new(ui_config),
             finished: false,
@@ -242,6 +244,10 @@ impl Chat {
 
     pub fn handle_click(&mut self, row: u16, area: Rect) {
         self.messages_panel.handle_click(row, area);
+    }
+
+    pub fn tool_id_at(&self, row: u16, area: Rect) -> Option<&str> {
+        self.messages_panel.tool_id_at(row, area)
     }
 
     pub fn tool_snapshot(

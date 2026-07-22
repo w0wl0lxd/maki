@@ -1,24 +1,27 @@
-Provide detailed summary for continuing conversation.
-Focus on: what we did, what we're doing, which files we're working on, what's next.
+Summarize the conversation above concisely. Focus on:
 
-Stick to template:
+- Goal and current progress
+- Files being modified
+- Key user constraints
+- Next steps
+
+Use this template:
 ---
 ## Goal
-[What goal(s) is user trying to accomplish?]
+[What is the user trying to accomplish?]
 
-## Instructions
-- [Important user instructions relevant to continuation]
-- [If plan/spec exists, include info]
+## Progress
+[What was done, what is in progress, what remains]
 
-## Discoveries
-[Notable things learned during conversation]
+## Files
+[Relevant files read/edited/created]
 
-## Accomplished
-[Work completed, in progress, left]
-
-## Relevant files / directories
-[Structured list of relevant files read/edited/created]
+## Constraints
+[Key user instructions or preferences]
 
 ## Todo list
-[If todo list in use, repeat verbatim with current status; must stay updated via todo_write after continuing. Otherwise omit]
+[All open todo items, if any, so they can be restored with todo_write]
+
+## Next
+[What to do next]
 ---

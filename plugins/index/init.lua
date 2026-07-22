@@ -159,7 +159,7 @@ maki.api.register_tool({
   schema = {
     type = "object",
     properties = {
-      path = { type = "string", description = "Absolute path to the file", required = true },
+      path = { type = "string", required = true },
     },
   },
   header = function(input)

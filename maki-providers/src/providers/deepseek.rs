@@ -37,7 +37,7 @@ inventory::submit!(maki_config::providers::BuiltInProvider {
     needs_url: false,
 });
 
-pub(crate) fn models() -> &'static [ModelEntry] {
+pub(crate) const fn models() -> &'static [ModelEntry] {
     &[
         ModelEntry {
             prefixes: &["deepseek-v4-flash"],
@@ -49,7 +49,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
                 input: 0.14,
                 output: 0.28,
                 cache_write: 0.00,
-                cache_read: 0.00,
+                cache_read: 0.0028,
                 fast: None,
             },
             max_output_tokens: 384_000,
@@ -65,7 +65,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
                 input: 0.435,
                 output: 0.87,
                 cache_write: 0.00,
-                cache_read: 0.00,
+                cache_read: 0.003625,
                 fast: None,
             },
             max_output_tokens: 384_000,

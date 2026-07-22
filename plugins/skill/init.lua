@@ -127,13 +127,14 @@ local function discover_skills()
   return skills
 end
 
-local DESCRIPTION =
-  "Load a skill that provides instructions and workflows for specific tasks. Use `list=true` to enumerate available skills."
+local boot_skills = discover_skills()
+local description = "Load a skill that provides instructions and workflows for specific tasks."
+  .. build_skill_list(boot_skills)
 
 maki.api.register_tool({
   name = "skill",
   kind = "read",
-  description = DESCRIPTION,
+  description = description,
 
   schema = {
     type = "object",

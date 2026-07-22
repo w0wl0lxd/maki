@@ -15,7 +15,6 @@ use serde_json::{Value, json};
 use crate::template::Vars;
 use crate::{BufferSnapshot, ToolOutput};
 
-use super::schema::sanitize_tool_input_schema;
 use super::{DescriptionContext, ToolContext};
 
 bitflags! {
@@ -453,11 +452,10 @@ impl ToolRegistry {
                 continue;
             }
             let description = vars.apply(&entry.tool.description(ctx)).into_owned();
-            let sanitized_schema = sanitize_tool_input_schema(entry.tool.schema());
             let mut def = json!({
                 "name": entry.name(),
                 "description": description,
-                "input_schema": sanitized_schema,
+                "input_schema": entry.tool.schema(),
             });
             if let Some(examples) = entry.tool.examples() {
                 if supports_examples {

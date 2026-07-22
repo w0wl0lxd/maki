@@ -668,33 +668,36 @@ fn log_coercion(
 /// can return schemas that break these rules, so this function repairs them
 /// before they are sent to a provider.
 pub fn sanitize_tool_input_schema(mut schema: Value) -> Value {
+    let original = schema.clone();
     if let Value::Object(map) = &mut schema
         && is_object_schema(map)
     {
         sanitize_object_schema(map);
-        return schema;
+    } else {
+        sanitize_property_schema(&mut schema);
     }
-    wrap_root_schema(schema)
+    if schema != original {
+        tracing::debug!(
+            from = %original,
+            to = %schema,
+            "sanitized tool input schema"
+        );
+    }
+    schema
 }
 
 fn is_object_schema(map: &serde_json::Map<String, Value>) -> bool {
     let type_str = map.get("type").and_then(|v| v.as_str());
     type_str == Some("object")
         || (type_str.is_none() && map.get("properties").and_then(|v| v.as_object()).is_some())
-        || map.is_empty()
 }
 
-fn wrap_root_schema(mut inner: Value) -> Value {
-    sanitize_property_schema(&mut inner);
-
-    let mut properties = serde_json::Map::new();
-    properties.insert("value".to_string(), inner);
-
-    json!({
-        "type": "object",
-        "properties": properties,
-        "required": ["value"],
-    })
+fn is_any_schema(map: &serde_json::Map<String, Value>) -> bool {
+    if map.is_empty() {
+        return true;
+    }
+    const META_KEYS: &[&str] = &["description", "title", "markdownDescription"];
+    map.keys().all(|k| META_KEYS.contains(&k.as_str()))
 }
 
 fn sanitize_object_schema(map: &mut serde_json::Map<String, Value>) {
@@ -740,8 +743,11 @@ fn sanitize_property_schema(schema: &mut Value) {
                 || map.contains_key("$ref")
             {
                 // Leave composite/reference schemas untouched.
+            } else if is_any_schema(map) {
+                // Description-only schemas (or empty `{}`) mean 'any value';
+                // wrapping them would break tools like `batch` that expect any.
             } else {
-                // Ambiguous description-only schema defaults to object.
+                // Ambiguous schema without structural keywords: default to object.
                 sanitize_object_schema(map);
             }
         }
@@ -1150,12 +1156,12 @@ mod tests {
         assert!(validate(schema, input).is_ok());
     }
 
-    #[test_case(json!({"type": "string"}), json!({"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]}) ; "type_string_root")]
-    #[test_case(json!({"type": "integer"}), json!({"type": "object", "properties": {"value": {"type": "integer"}}, "required": ["value"]}) ; "type_integer_root")]
-    #[test_case(json!({"type": "boolean"}), json!({"type": "object", "properties": {"value": {"type": "boolean"}}, "required": ["value"]}) ; "type_boolean_root")]
-    fn sanitize_primitive_root_wraps_as_object(input: Value, expected: Value) {
-        let result = sanitize_tool_input_schema(input);
-        assert_eq!(result, expected);
+    #[test_case(json!({"type": "string"}) ; "type_string_root")]
+    #[test_case(json!({"type": "integer"}) ; "type_integer_root")]
+    #[test_case(json!({"type": "boolean"}) ; "type_boolean_root")]
+    fn sanitize_primitive_root_is_unchanged(input: Value) {
+        let result = sanitize_tool_input_schema(input.clone());
+        assert_eq!(result, input);
     }
 
     #[test_case(json!({"type": "object", "required": {}}), json!({"type": "object", "properties": {}, "required": []}) ; "required_object")]
@@ -1166,13 +1172,13 @@ mod tests {
     }
 
     #[test_case(json!({"type": "object"}), json!({"type": "object", "properties": {}}) ; "missing_properties")]
-    #[test_case(json!({}), json!({"type": "object", "properties": {}}) ; "empty_schema")]
+    #[test_case(json!({}), json!({}) ; "empty_schema_any")]
     fn sanitize_missing_properties(input: Value, expected: Value) {
         let result = sanitize_tool_input_schema(input);
         assert_eq!(result, expected);
     }
 
-    #[test_case(json!({"type": "array", "prefixItems": [{"type": "string"}]}), json!({"type": "object", "properties": {"value": {"type": "array", "items": {"type": "string"}}}, "required": ["value"]}) ; "prefixitems_to_items")]
+    #[test_case(json!({"type": "array", "prefixItems": [{"type": "string"}]}), json!({"type": "array", "items": {"type": "string"}}) ; "prefixitems_to_items")]
     fn sanitize_prefixitems_to_items(input: Value, expected: Value) {
         let result = sanitize_tool_input_schema(input);
         assert_eq!(result, expected);
@@ -1219,22 +1225,19 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_handles_string_with_description() {
+    fn sanitize_leaves_primitive_with_description_unchanged() {
         let input = json!({
             "type": "string",
             "description": "A string value"
         });
-        let expected = json!({
-            "type": "object",
-            "properties": {
-                "value": {
-                    "type": "string",
-                    "description": "A string value"
-                }
-            },
-            "required": ["value"]
-        });
-        let result = sanitize_tool_input_schema(input);
-        assert_eq!(result, expected);
+        let result = sanitize_tool_input_schema(input.clone());
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn sanitize_leaves_description_only_as_any() {
+        let input = json!({"description": "Any value"});
+        let result = sanitize_tool_input_schema(input.clone());
+        assert_eq!(result, input);
     }
 }

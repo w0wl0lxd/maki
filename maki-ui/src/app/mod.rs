@@ -932,12 +932,7 @@ impl App {
             if sub.is_empty() {
                 return vec![];
             }
-            let subagent_id = self
-                .chat_index
-                .iter()
-                .find(|&(_, &idx)| idx == self.active_chat)
-                .map(|(id, _)| id.clone());
-            let Some(tool_use_id) = subagent_id else {
+            let Some(tool_use_id) = self.chats[self.active_chat].tool_use_id.clone() else {
                 return vec![];
             };
             self.handle_subagent_prompt_result(tool_use_id, sub.text);
@@ -992,13 +987,7 @@ impl App {
     }
 
     fn handle_subagent_cancel(&mut self) -> Vec<Action> {
-        let tool_use_id = self
-            .chat_index
-            .iter()
-            .find(|&(_, &idx)| idx == self.active_chat)
-            .map(|(id, _)| id.clone());
-
-        let Some(tool_use_id) = tool_use_id else {
+        let Some(tool_use_id) = self.chats[self.active_chat].tool_use_id.clone() else {
             return vec![];
         };
 
@@ -1006,6 +995,7 @@ impl App {
         self.chats[self.active_chat].cancel_in_progress();
         self.chats[self.active_chat].mark_finished(DisplayRole::Error, CANCELLED_TEXT);
         self.subagent_answers.remove(&tool_use_id);
+        self.subagent_prompts.remove(&tool_use_id);
 
         vec![Action::CancelSubagent { tool_use_id }]
     }
@@ -1181,6 +1171,7 @@ impl App {
                     self.save_session();
                     self.chat_index.clear();
                     self.subagent_answers.clear();
+                    self.subagent_prompts.clear();
                     self.status = Status::Idle;
                     self.fire_session_autocmd("TurnEnd", serde_json::json!({}));
                     if self.exit_on_done {
@@ -1217,12 +1208,6 @@ impl App {
     fn resolve_or_create_chat(&mut self, subagent: &SubagentInfo) -> usize {
         let id = &subagent.parent_tool_use_id;
         if let Some(&idx) = self.chat_index.get(id.as_str()) {
-            if let Some(ref tx) = subagent.answer_tx {
-                self.subagent_answers.insert(id.clone(), tx.clone());
-            }
-            if let Some(ref tx) = subagent.prompt_tx {
-                self.subagent_prompts.insert(id.clone(), tx.clone());
-            }
             return idx;
         }
         let idx = self.chats.len();
@@ -1238,6 +1223,7 @@ impl App {
             self.chats[0].update_tool_model(id, model);
         }
         let mut chat = Chat::new(subagent.name.clone(), self.ui_config);
+        chat.tool_use_id = Some(id.clone());
         chat.set_restore_channel(self.lua_event_handle.clone(), self.restore_event_tx.clone());
         chat.model_id = subagent.model.clone();
         if let Some(ref prompt) = subagent.prompt {
@@ -1560,6 +1546,8 @@ impl App {
             self.chats[sub_idx].mark_finished(role.clone(), text);
         }
         self.chat_index.clear();
+        self.subagent_answers.clear();
+        self.subagent_prompts.clear();
     }
 
     pub fn flush_all_chats(&mut self) {

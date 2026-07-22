@@ -866,17 +866,17 @@ fn picker_navigate_to_subagent_then_type_routes_prompt_to_subagent() {
     app.status = Status::Streaming;
     app.run_id = 1;
     let (prompt_tx, prompt_rx) = flume::bounded::<String>(32);
-    app.update(subagent_msg(
-        AgentEvent::TextDelta { text: "x".into() },
-        "task1",
-        Some("research"),
-    ));
-    let info = subagent_info_with_channels("task1", "task1", "research", None, Some(prompt_tx));
-    app.handle_agent_event(Envelope {
+    app.update(Msg::Agent(Box::new(Envelope {
         event: AgentEvent::TextDelta { text: "x".into() },
-        subagent: Some(info),
+        subagent: Some(subagent_info_with_channels(
+            "task1",
+            "task1",
+            "research",
+            None,
+            Some(prompt_tx),
+        )),
         run_id: 1,
-    });
+    })));
 
     app.update(Msg::Key(kb::TASKS.to_key_event()));
     app.update(Msg::Key(key(KeyCode::Down)));
@@ -3211,19 +3211,19 @@ fn typing_in_running_subagent_routes_prompt_to_that_agent() {
     app.status = Status::Streaming;
     app.run_id = 1;
     let (prompt_tx, prompt_rx) = flume::bounded::<String>(32);
-    app.update(subagent_msg(
-        AgentEvent::TextDelta {
+    app.update(Msg::Agent(Box::new(Envelope {
+        event: AgentEvent::TextDelta {
             text: "running".into(),
         },
-        "task1",
-        Some("research"),
-    ));
-    let info = subagent_info_with_channels("task1", "task1", "research", None, Some(prompt_tx));
-    app.handle_agent_event(Envelope {
-        event: AgentEvent::TextDelta { text: "x".into() },
-        subagent: Some(info),
+        subagent: Some(subagent_info_with_channels(
+            "task1",
+            "task1",
+            "research",
+            None,
+            Some(prompt_tx),
+        )),
         run_id: 1,
-    });
+    })));
     assert_eq!(app.chats.len(), 2);
     assert_eq!(app.active_chat, 0);
     app.active_chat = 1;
@@ -3245,19 +3245,19 @@ fn pasting_in_running_subagent_routes_prompt_to_that_agent() {
     app.status = Status::Streaming;
     app.run_id = 1;
     let (prompt_tx, prompt_rx) = flume::bounded::<String>(32);
-    app.update(subagent_msg(
-        AgentEvent::TextDelta {
+    app.update(Msg::Agent(Box::new(Envelope {
+        event: AgentEvent::TextDelta {
             text: "running".into(),
         },
-        "task1",
-        Some("research"),
-    ));
-    let info = subagent_info_with_channels("task1", "task1", "research", None, Some(prompt_tx));
-    app.handle_agent_event(Envelope {
-        event: AgentEvent::TextDelta { text: "x".into() },
-        subagent: Some(info),
+        subagent: Some(subagent_info_with_channels(
+            "task1",
+            "task1",
+            "research",
+            None,
+            Some(prompt_tx),
+        )),
         run_id: 1,
-    });
+    })));
     app.active_chat = 1;
 
     app.update(Msg::Paste("pasted follow-up".into()));
@@ -3361,4 +3361,65 @@ fn permission_answer_to_finished_subagent_does_not_fall_back_to_main() {
     assert!(main_rx.try_recv().is_err());
     assert!(sub_rx.try_recv().is_err());
     assert!(!app.permission_prompt.is_open());
+}
+
+#[test]
+fn permission_answer_to_active_subagent_routes_to_subagent() {
+    let (mut app, sub_rx, main_rx) = app_with_subagent_tx("task1");
+    app.permission_prompt.open(
+        "perm-id".into(),
+        ToolKey::native("bash"),
+        vec!["execute".into()],
+        Some("task1".into()),
+    );
+
+    app.update(Msg::Key(key(KeyCode::Char('y'))));
+
+    assert_eq!(sub_rx.try_recv().unwrap(), "allow");
+    assert!(main_rx.try_recv().is_err());
+    assert!(!app.permission_prompt.is_open());
+}
+
+#[test]
+fn permission_answer_to_disconnected_subagent_does_not_fall_back_to_main() {
+    let (mut app, sub_rx, main_rx) = app_with_subagent_tx("task1");
+    drop(sub_rx);
+    app.permission_prompt.open(
+        "perm-id".into(),
+        ToolKey::native("bash"),
+        vec!["execute".into()],
+        Some("task1".into()),
+    );
+
+    app.update(Msg::Key(key(KeyCode::Char('y'))));
+
+    assert!(main_rx.try_recv().is_err());
+    assert!(!app.permission_prompt.is_open());
+}
+
+#[test]
+fn cancel_subagent_removes_prompt_sender() {
+    let (prompt_tx, _prompt_rx) = flume::bounded::<String>(2);
+    let mut app = test_app();
+    app.status = Status::Streaming;
+    app.run_id = 1;
+    app.update(Msg::Agent(Box::new(Envelope {
+        event: AgentEvent::TextDelta { text: "x".into() },
+        subagent: Some(subagent_info_with_channels(
+            "task1",
+            "task1",
+            "research",
+            None,
+            Some(prompt_tx),
+        )),
+        run_id: 1,
+    })));
+    app.active_chat = 1;
+    app.last_esc = Some(Instant::now());
+
+    app.update(Msg::Key(key(KeyCode::Esc)));
+
+    assert!(app.chats[1].is_finished());
+    assert!(!app.subagent_prompts.contains_key("task1"));
+    assert!(!app.subagent_answers.contains_key("task1"));
 }

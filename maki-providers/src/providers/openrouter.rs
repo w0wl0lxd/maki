@@ -204,7 +204,7 @@ impl Provider for OpenRouter {
             }
 
             if let Some(sid) = session_id {
-                body["session_id"] = json!(sid.to_string());
+                body["session_id"] = json!(sid.as_str());
             }
 
             let extra_headers = [("HTTP-Referer", REFERER), ("X-OpenRouter-Title", APP_TITLE)];

@@ -203,13 +203,15 @@ impl App {
     ) -> Self {
         scrollbar::set_enabled(ui_config.scrollbar);
         let state = SessionState::from_session(session, model, &storage);
+        let mut input_box = InputBox::new(InputHistory::load(&storage, input_history_size));
+        input_box.set_max_input_lines(ui_config.max_input_lines);
         let typewriter = ui_config.typewriter_ms_per_char;
         let flash = ui_config.flash_duration();
         let mut app = Self {
             chats: vec![Chat::new("Main".into(), ui_config.clone())],
             active_chat: 0,
             chat_index: HashMap::new(),
-            input_box: InputBox::new(InputHistory::load(&storage, input_history_size)),
+            input_box,
             command_palette: CommandPalette::new(
                 custom_commands,
                 mcp_reader.clone(),

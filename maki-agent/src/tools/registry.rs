@@ -266,6 +266,29 @@ pub enum RegistryError {
     NameConflict { name: String, existing: String },
 }
 
+fn build_tool_definition(
+    entry: &RegisteredTool,
+    vars: &Vars,
+    ctx: &DescriptionContext,
+    supports_examples: bool,
+) -> Value {
+    let description = vars.apply(&entry.tool.description(ctx)).into_owned();
+    let mut def = json!({
+        "name": entry.name(),
+        "description": description,
+        "input_schema": entry.tool.schema(),
+    });
+    if let Some(examples) = entry.tool.examples() {
+        if supports_examples {
+            def["input_examples"] = examples;
+        } else if let Some(text) = format_examples_as_text(&examples) {
+            let merged = format!("{}\n\n{}", def["description"].as_str().unwrap_or(""), text);
+            def["description"] = Value::String(merged);
+        }
+    }
+    def
+}
+
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
@@ -454,22 +477,7 @@ impl ToolRegistry {
             if !ctx.filter.matches(entry.name()) {
                 continue;
             }
-            let description = vars.apply(&entry.tool.description(ctx)).into_owned();
-            let mut def = json!({
-                "name": entry.name(),
-                "description": description,
-                "input_schema": entry.tool.schema(),
-            });
-            if let Some(examples) = entry.tool.examples() {
-                if supports_examples {
-                    def["input_examples"] = examples;
-                } else if let Some(text) = format_examples_as_text(&examples) {
-                    let merged =
-                        format!("{}\n\n{}", def["description"].as_str().unwrap_or(""), text);
-                    def["description"] = Value::String(merged);
-                }
-            }
-            out.push(def);
+            out.push(build_tool_definition(entry, vars, ctx, supports_examples));
         }
         Value::Array(out)
     }
@@ -512,22 +520,7 @@ impl ToolRegistry {
             if !allowed_set.contains(entry.name()) {
                 continue;
             }
-            let description = vars.apply(&entry.tool.description(ctx)).into_owned();
-            let mut def = json!({
-                "name": entry.name(),
-                "description": description,
-                "input_schema": entry.tool.schema(),
-            });
-            if let Some(examples) = entry.tool.examples() {
-                if supports_examples {
-                    def["input_examples"] = examples;
-                } else if let Some(text) = format_examples_as_text(&examples) {
-                    let merged =
-                        format!("{}\n\n{}", def["description"].as_str().unwrap_or(""), text);
-                    def["description"] = Value::String(merged);
-                }
-            }
-            out.push(def);
+            out.push(build_tool_definition(entry, vars, ctx, supports_examples));
         }
         Value::Array(out)
     }

@@ -4,13 +4,12 @@ use maki_agent::template::Vars;
 use maki_agent::tools::{DescriptionContext, ToolAudience, ToolFilter, ToolRegistry};
 use maki_providers::Model;
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let registry = ToolRegistry::global_arc();
-    let _host = maki_lua::PluginHost::with_all_builtins(Arc::clone(registry))
-        .expect("failed to load builtin plugins");
+    let _host = maki_lua::PluginHost::with_all_builtins(Arc::clone(registry))?;
 
     let vars = Vars::new();
-    let model = Model::from_spec("anthropic/claude-sonnet-4-6").expect("failed to resolve model");
+    let model = Model::from_spec("anthropic/claude-sonnet-4-6")?;
 
     let filter = ToolFilter::All;
     let ctx = DescriptionContext {
@@ -29,22 +28,20 @@ fn main() {
         let allowed = registry.active_tools_for_mode(mode, &[]);
         let defs =
             registry.definitions_filtered(&vars, &ctx, model.supports_tool_examples(), &allowed);
-        let bytes = serde_json::to_vec(&defs)
-            .expect("tool definitions must serialize")
-            .len();
+        let bytes = serde_json::to_vec(&defs)?.len();
         let count = allowed.len();
 
         println!("{:<15} {:<15} {:<15}", mode, count, bytes);
     }
 
     let all_defs = registry.definitions(&vars, &ctx, model.supports_tool_examples());
-    let all_bytes = serde_json::to_vec(&all_defs)
-        .expect("tool definitions must serialize")
-        .len();
+    let all_bytes = serde_json::to_vec(&all_defs)?.len();
     let all_count = registry.names().len();
 
     println!(
         "{:<15} {:<15} {:<15}",
         "all (unfiltered)", all_count, all_bytes
     );
+
+    Ok(())
 }

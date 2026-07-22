@@ -20,6 +20,10 @@ path = "src/main.rs"
 name = "anthropic_cache_benchmark"
 path = "scripts/anthropic_cache_benchmark.rs"
 
+[[bin]]
+name = "dynamic_tool_size"
+path = "scripts/dynamic_tool_size.rs"
+
 [dependencies]
 maki-ui = { workspace = true }
 maki-agent = { workspace = true }

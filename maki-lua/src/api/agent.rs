@@ -784,6 +784,8 @@ impl SessionState {
 
 struct PromptInterruptSource {
     rx: flume::Receiver<String>,
+    thinking: ThinkingConfig,
+    fast: bool,
 }
 
 impl maki_agent::InterruptSource for PromptInterruptSource {
@@ -795,8 +797,8 @@ impl maki_agent::InterruptSource for PromptInterruptSource {
                     mode: AgentMode::Build,
                     images: Vec::new(),
                     preamble: Vec::new(),
-                    thinking: ThinkingConfig::default(),
-                    fast: false,
+                    thinking: self.thinking,
+                    fast: self.fast,
                     workflow: false,
                     prompt: None,
                 },
@@ -877,6 +879,8 @@ async fn prompt(
         .with_user_response_rx(Arc::clone(&s.answer_rx))
         .with_interrupt_source(Arc::new(PromptInterruptSource {
             rx: s.prompt_rx.clone(),
+            thinking: s.thinking,
+            fast: s.fast,
         }))
         .with_cancel(s.child_cancel.clone())
         .with_mcp(s.mcp.clone())
@@ -1000,6 +1004,7 @@ fn call_local_tool(
 mod tests {
     use serde_json::json;
 
+    use maki_agent::{ExtractedCommand, InterruptSource};
     use super::*;
 
     fn call(src: &str, input: JsonValue) -> Result<String, String> {
@@ -1159,5 +1164,24 @@ mod tests {
         assert!(state.current.is_none());
         assert_eq!(state.completed_count, 1);
         assert_eq!(state.recent[0], "direct_complete");
+    }
+
+    #[test]
+    fn prompt_interrupt_source_preserves_session_thinking_and_fast() {
+        let (tx, rx) = flume::unbounded();
+        let source = PromptInterruptSource {
+            rx,
+            thinking: ThinkingConfig::Budget(1234),
+            fast: true,
+        };
+        tx.send("steer".into()).unwrap();
+
+        let Some(ExtractedCommand::Interrupt(input, _)) = source.poll() else {
+            panic!("expected an interrupt command");
+        };
+
+        assert_eq!(input.message, "steer");
+        assert!(matches!(input.thinking, ThinkingConfig::Budget(1234)));
+        assert!(input.fast);
     }
 }

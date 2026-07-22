@@ -1570,10 +1570,9 @@ impl App {
         try_picker!(self.model_picker);
         try_picker!(self.mcp_picker);
         try_picker!(self.login_picker);
-        if !self.is_main_chat() {
-            return;
-        }
-        if let InputAction::PaletteSync(val) = self.input_box.handle_paste(text) {
+        if let InputAction::PaletteSync(val) = self.input_box.handle_paste(text)
+            && self.is_main_chat()
+        {
             self.command_palette.sync(&val);
         }
     }

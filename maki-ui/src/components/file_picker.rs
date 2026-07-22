@@ -78,15 +78,11 @@ impl Drop for Session {
 
 pub struct FilePickerModal {
     session: Option<Session>,
-    opened_via_at: bool,
 }
 
 impl FilePickerModal {
     pub fn new() -> Self {
-        Self {
-            session: None,
-            opened_via_at: false,
-        }
+        Self { session: None }
     }
 
     pub fn open(&mut self, cwd: &str) {
@@ -166,18 +162,8 @@ impl FilePickerModal {
         });
     }
 
-    pub fn open_via_at(&mut self, cwd: &str) {
-        self.open(cwd);
-        self.opened_via_at = true;
-    }
-
-    pub fn take_at_mention(&mut self) -> bool {
-        std::mem::replace(&mut self.opened_via_at, false)
-    }
-
     pub fn close(&mut self) {
         self.session = None;
-        self.opened_via_at = false;
     }
 
     pub fn is_open(&self) -> bool {

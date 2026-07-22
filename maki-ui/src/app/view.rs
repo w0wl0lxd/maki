@@ -206,6 +206,12 @@ impl App {
                 panel_hint,
             );
             self.command_palette.view(frame, layout.input_area);
+            if self.mention_flyout.is_open() {
+                if let Some(flash) = self.mention_flyout.tick() {
+                    self.status_bar.flash(flash);
+                }
+                self.mention_flyout.view(frame, layout.input_area);
+            }
         }
     }
 

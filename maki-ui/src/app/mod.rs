@@ -34,6 +34,7 @@ use crate::components::list_picker::{ListPicker, PickerAction, PickerItem};
 use crate::components::login_picker::{LoginPicker, LoginPickerAction};
 use crate::components::lua_float::FloatManager;
 use crate::components::mcp_picker::{McpPicker, McpPickerAction};
+use crate::components::mention_flyout::{MentionAction, MentionFlyout};
 use crate::components::model_picker::{ModelPicker, ModelPickerAction};
 use crate::components::permission_prompt::PermissionPrompt;
 use crate::components::plan_form::{PlanForm, PlanFormAction};
@@ -147,6 +148,7 @@ pub struct App {
     pub(super) float_mgr: FloatManager,
     pub(super) search_modal: SearchModal,
     pub(super) file_picker: FilePickerModal,
+    pub(super) mention_flyout: MentionFlyout,
     pub(super) permission_prompt: PermissionPrompt,
     pub(super) plan_form: PlanForm,
     pub(super) status_bar: StatusBar,
@@ -226,6 +228,7 @@ impl App {
             float_mgr: FloatManager::new(),
             search_modal: SearchModal::new(),
             file_picker: FilePickerModal::new(),
+            mention_flyout: MentionFlyout::new(),
             permission_prompt: PermissionPrompt::new(),
             plan_form: PlanForm::new(),
             status_bar: StatusBar::new(ui_config.flash_duration()),
@@ -558,6 +561,22 @@ impl App {
             return Some(vec![]);
         }
 
+        if self.mention_flyout.is_open() {
+            return Some(match self.mention_flyout.handle_key(key) {
+                MentionAction::Consumed => vec![],
+                MentionAction::Select(path) => {
+                    self.mention_flyout.close();
+                    self.input_box.replace_mention(&path);
+                    self.command_palette.sync(&self.input_box.buffer.value());
+                    vec![]
+                }
+                MentionAction::Close => {
+                    self.mention_flyout.close();
+                    vec![]
+                }
+            });
+        }
+
         if self.file_picker.is_open() {
             return Some(match self.file_picker.handle_key(key) {
                 FilePickerModalAction::Consumed => vec![],
@@ -571,12 +590,7 @@ impl App {
                     vec![]
                 }
                 FilePickerModalAction::Close => {
-                    let was_at = self.file_picker.take_at_mention();
                     self.file_picker.close();
-                    if was_at {
-                        self.input_box.buffer.push_char('@');
-                        self.command_palette.sync(&self.input_box.buffer.value());
-                    }
                     vec![]
                 }
             });
@@ -781,12 +795,21 @@ impl App {
         let streaming = self.status == Status::Streaming;
         match self.input_box.handle_key(key) {
             InputAction::Submit(sub) => self.handle_submit(sub),
-            InputAction::OpenFilePicker => {
-                self.file_picker.open_via_at(&self.state.session.cwd);
+            InputAction::OpenMention => {
+                if let Some(query) = self.input_box.mention_query() {
+                    self.mention_flyout.open(&self.state.session.cwd, query);
+                }
                 vec![]
             }
             InputAction::PaletteSync(val) => {
                 self.command_palette.sync(&val);
+                if self.mention_flyout.is_open() {
+                    if let Some(query) = self.input_box.mention_query() {
+                        self.mention_flyout.set_query(query);
+                    } else {
+                        self.mention_flyout.close();
+                    }
+                }
                 vec![]
             }
             InputAction::Passthrough(key) => {

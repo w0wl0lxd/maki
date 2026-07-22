@@ -21,6 +21,7 @@ pub const DEFAULT_MAX_OUTPUT_LINES: usize = 2000;
 pub const DEFAULT_FLASH_DURATION_MS: u64 = 1500;
 pub const DEFAULT_TYPEWRITER_MS_PER_CHAR: u64 = 4;
 pub const DEFAULT_MOUSE_SCROLL_LINES: u32 = 3;
+pub const DEFAULT_MCP_TOOL_DESC_MAX_CHARS: usize = 300;
 
 pub const DEFAULT_MAX_CONTINUATION_TURNS: u32 = 3;
 pub const DEFAULT_COMPACTION_BUFFER: CompactionBuffer = CompactionBuffer::Percent(20);
@@ -451,6 +452,7 @@ pub struct AgentFileConfig {
     pub max_output_lines: Option<usize>,
     pub max_continuation_turns: Option<u32>,
     pub compaction_buffer: Option<CompactionBuffer>,
+    pub mcp_tool_desc_max_chars: Option<usize>,
 }
 
 impl AgentFileConfig {
@@ -461,7 +463,8 @@ impl AgentFileConfig {
             max_output_bytes,
             max_output_lines,
             max_continuation_turns,
-            compaction_buffer
+            compaction_buffer,
+            mcp_tool_desc_max_chars
         );
     }
 }
@@ -965,6 +968,9 @@ pub struct AgentConfig {
     #[config(default = DEFAULT_COMPACTION_BUFFER, ty = "u32 | string", default_doc = "20%", desc = "Context reserved for compaction: token count or percent of the context window (e.g. \"20%\")")]
     pub compaction_buffer: CompactionBuffer,
 
+    #[config(default = DEFAULT_MCP_TOOL_DESC_MAX_CHARS, min = 10, desc = "Max MCP tool description length (characters)")]
+    pub mcp_tool_desc_max_chars: usize,
+
     #[config(skip, default = false)]
     pub no_rtk: bool,
 
@@ -988,6 +994,9 @@ impl AgentConfig {
                 .max_continuation_turns
                 .unwrap_or(DEFAULT_MAX_CONTINUATION_TURNS),
             compaction_buffer: file.compaction_buffer.unwrap_or(DEFAULT_COMPACTION_BUFFER),
+            mcp_tool_desc_max_chars: file
+                .mcp_tool_desc_max_chars
+                .unwrap_or(DEFAULT_MCP_TOOL_DESC_MAX_CHARS),
             max_turns: None,
             allowed_tools: Vec::new(),
             disabled_tools,

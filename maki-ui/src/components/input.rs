@@ -4,7 +4,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::shell::parse_shell_prefix;
 use crate::highlight;
-use crate::text_buffer::{is_newline_key, EditResult, TextBuffer};
+use crate::text_buffer::{EditResult, TextBuffer, is_newline_key};
 use crate::theme;
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -12,11 +12,11 @@ use maki_storage::input_history::InputHistory;
 use std::mem;
 
 use maki_providers::ImageSource;
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
-use ratatui::Frame;
 
 use super::scrollbar::render_vertical_scrollbar;
 use super::{apply_scroll_delta, visual_line_count};
@@ -840,7 +840,11 @@ mod tests {
         for _ in 0..extra_lines {
             input.buffer.add_line();
         }
-        let terminal = render_input(&mut input, 40, DEFAULT_MAX_INPUT_LINES as u16 + BORDER_LINES);
+        let terminal = render_input(
+            &mut input,
+            40,
+            DEFAULT_MAX_INPUT_LINES as u16 + BORDER_LINES,
+        );
         assert_eq!(has_scrollbar_thumb(&terminal), expect_visible);
     }
 

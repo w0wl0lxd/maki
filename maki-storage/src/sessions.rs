@@ -980,7 +980,9 @@ fn scan_headers(cwd: &str, dir: &Path) -> Result<Vec<SessionSummary>, StorageErr
         };
         if let Some(h) = &entry.header
             && h.cwd == cwd
-            && selected.get(&h.id).is_none_or(|(jsonl, _)| from_jsonl && !*jsonl)
+            && selected
+                .get(&h.id)
+                .is_none_or(|(jsonl, _)| from_jsonl && !*jsonl)
         {
             selected.insert(
                 h.id,

@@ -100,6 +100,7 @@ impl InputBox {
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
                     && self.char_before_cursor_is_whitespace_or_start() =>
             {
+                self.buffer.push_char('@');
                 return InputAction::OpenMention;
             }
             _ if is_newline_key(&key) => {
@@ -1169,7 +1170,7 @@ mod tests {
         let mut input = InputBox::new(InputHistory::default());
         let action = input.handle_key(key_char('@'));
         assert!(matches!(action, InputAction::OpenMention));
-        assert_eq!(input.buffer.value(), "");
+        assert_eq!(input.buffer.value(), "@");
     }
 
     #[test]
@@ -1178,7 +1179,7 @@ mod tests {
         type_text(&mut input, "read ");
         let action = input.handle_key(key_char('@'));
         assert!(matches!(action, InputAction::OpenMention));
-        assert_eq!(input.buffer.value(), "read ");
+        assert_eq!(input.buffer.value(), "read @");
     }
 
     #[test]
@@ -1188,7 +1189,7 @@ mod tests {
         input.buffer.add_line();
         let action = input.handle_key(key_char('@'));
         assert!(matches!(action, InputAction::OpenMention));
-        assert_eq!(input.buffer.value(), "read\n");
+        assert_eq!(input.buffer.value(), "read\n@");
     }
 
     #[test]

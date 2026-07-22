@@ -328,7 +328,11 @@ impl App {
 
     pub fn update(&mut self, msg: Msg) -> Vec<Action> {
         match msg {
-            Msg::Key(key) => self.handle_key(key),
+            Msg::Key(key) => {
+                let actions = self.handle_key(key);
+                self.close_mention_flyout_if_invalid();
+                actions
+            }
             Msg::Paste(text) => {
                 let text = text.replace("\r\n", "\n").replace('\r', "\n");
                 if text.is_empty() {
@@ -349,6 +353,7 @@ impl App {
                         self.route_text_paste(&text);
                     }
                 }
+                self.close_mention_flyout_if_invalid();
                 vec![]
             }
             Msg::Mouse(event) => {
@@ -562,19 +567,24 @@ impl App {
         }
 
         if self.mention_flyout.is_open() {
-            return Some(match self.mention_flyout.handle_key(key) {
-                MentionAction::Consumed => vec![],
-                MentionAction::Select(path) => {
-                    self.mention_flyout.close();
-                    self.input_box.replace_mention(&path);
-                    self.command_palette.sync(&self.input_box.buffer.value());
-                    vec![]
+            match key.code {
+                KeyCode::Up | KeyCode::Down | KeyCode::Enter | KeyCode::Esc => {
+                    return Some(match self.mention_flyout.handle_key(key) {
+                        MentionAction::Consumed => vec![],
+                        MentionAction::Select(path) => {
+                            self.mention_flyout.close();
+                            self.input_box.replace_mention(&path);
+                            self.command_palette.sync(&self.input_box.buffer.value());
+                            vec![]
+                        }
+                        MentionAction::Close => {
+                            self.mention_flyout.close();
+                            vec![]
+                        }
+                    });
                 }
-                MentionAction::Close => {
-                    self.mention_flyout.close();
-                    vec![]
-                }
-            });
+                _ => {}
+            }
         }
 
         if self.file_picker.is_open() {
@@ -746,6 +756,12 @@ impl App {
             }
         }
         false
+    }
+
+    fn close_mention_flyout_if_invalid(&mut self) {
+        if self.mention_flyout.is_open() && self.input_box.mention_query().is_none() {
+            self.mention_flyout.close();
+        }
     }
 
     fn handle_main_chat_key(&mut self, key: KeyEvent) -> Vec<Action> {

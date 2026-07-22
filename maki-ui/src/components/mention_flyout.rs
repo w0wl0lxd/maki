@@ -12,9 +12,9 @@ use nucleo::pattern::{CaseMatching, Normalization};
 use nucleo::{Config, Matcher, Nucleo, Utf32String};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use tracing::warn;
 use unicode_width::UnicodeWidthChar;
 
@@ -307,41 +307,39 @@ impl MentionFlyout {
         }
     }
 
-    pub fn view(&mut self, frame: &mut Frame, anchor: Rect) -> Rect {
+    pub fn height(&self, _width: u16) -> u16 {
+        let s = match &self.session {
+            Some(s) if s.visible => s,
+            _ => return 0,
+        };
+
+        let match_count = s.matches.len() as u16;
+        let has_query_without_matches = s.matches.is_empty() && !s.query.is_empty();
+        let content_rows = if has_query_without_matches {
+            1
+        } else {
+            match_count.min(MAX_HEIGHT)
+        };
+        content_rows + 1
+    }
+
+    pub fn view(&mut self, frame: &mut Frame, area: Rect) -> Rect {
         let s = match &mut self.session {
             Some(s) if s.visible => s,
             _ => return Rect::default(),
         };
 
-        let match_count = s.matches.len() as u16;
-        let has_query_without_matches = s.matches.is_empty() && !s.query.is_empty();
-        let max_visible = MAX_HEIGHT;
-        let content_rows = if has_query_without_matches {
-            1
-        } else {
-            match_count.min(max_visible)
-        };
-
-        let width = anchor.width.min(60);
-        let height = content_rows + 2;
-
-        let x = anchor.x;
-        let y = anchor.y.saturating_sub(height);
-
-        let popup = Rect::new(x, y, width, height);
-        s.viewport_height = popup.height.saturating_sub(2) as usize;
-        Self::ensure_visible_impl(s);
-
         let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Plain)
-            .border_style(Style::default());
-        frame.render_widget(block, popup);
+            .borders(Borders::TOP)
+            .border_style(theme::current().tool_dim);
+        frame.render_widget(block, area);
 
-        let inner = popup.inner(ratatui::layout::Margin::new(1, 1));
+        let inner = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(1));
+        s.viewport_height = inner.height as usize;
+        Self::ensure_visible_impl(s);
         Self::render_list_impl(frame, inner, s);
 
-        popup
+        area
     }
 
     fn render_list_impl(frame: &mut Frame, area: Rect, s: &Session) {

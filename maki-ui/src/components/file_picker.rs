@@ -14,22 +14,19 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use tracing::warn;
 use unicode_width::UnicodeWidthChar;
 
 use crate::animation::spinner_frame;
 use crate::components::Overlay;
 use crate::components::keybindings::key;
-use crate::components::modal::Modal;
 use crate::components::scrollbar::render_vertical_scrollbar;
 use crate::text_buffer::TextBuffer;
 use crate::theme;
 
 const TITLE: &str = " Files ";
 const TITLE_WALKING: &str = " Files (scanning…) ";
-const WIDTH_PERCENT: u16 = 60;
-const MAX_HEIGHT_PERCENT: u16 = 80;
 const SEARCH_ROW: u16 = 1;
 const NO_MATCHES: &str = "  No matches";
 const LABEL_INDENT: &str = "  ";
@@ -287,7 +284,7 @@ impl FilePickerModal {
         None
     }
 
-    pub fn view(&mut self, frame: &mut Frame, area: Rect) -> Rect {
+    pub fn view(&mut self, frame: &mut Frame, anchor: Rect) -> Rect {
         let s = match &mut self.session {
             Some(s) if s.visible => s,
             _ => return Rect::default(),
@@ -297,19 +294,29 @@ impl FilePickerModal {
         let title = if s.walking { TITLE_WALKING } else { TITLE };
 
         let has_query_without_matches = s.matches.is_empty() && !s.search.value().is_empty();
-        let max_visible = area.height.saturating_sub(SEARCH_ROW + 2);
-        let content_rows = if has_query_without_matches {
-            1
+        let has_content = match_count > 0 || has_query_without_matches;
+        let max_content = anchor.y.saturating_sub(SEARCH_ROW + 2).max(1);
+        let content_rows = if has_content {
+            match_count.min(max_content).max(1)
         } else {
-            match_count.min(max_visible)
+            0
         };
+        let height = content_rows + SEARCH_ROW + 2;
+        let width = anchor.width.clamp(20, 60);
 
-        let modal = Modal {
-            title,
-            width_percent: WIDTH_PERCENT,
-            max_height_percent: MAX_HEIGHT_PERCENT,
-        };
-        let (popup, inner) = modal.render(frame, area, content_rows + SEARCH_ROW);
+        let x = anchor.x + (anchor.width.saturating_sub(width)) / 2;
+        let y = anchor.y.saturating_sub(height);
+
+        let popup = Rect::new(x, y, width, height);
+        frame.render_widget(Clear, popup);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(theme::current().tool_dim);
+        frame.render_widget(block, popup);
+
+        let inner = popup.inner(ratatui::layout::Margin::new(1, 1));
         s.inner_area = inner;
         s.viewport_height = inner.height.saturating_sub(SEARCH_ROW) as usize;
         ensure_visible(s);

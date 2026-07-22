@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::env;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::thread;
 use std::time::Duration;
 
@@ -53,7 +53,7 @@ impl JobStore {
         on_stderr: Option<RegistryKey>,
         on_exit: Option<RegistryKey>,
     ) -> Result<u32, String> {
-        let mut command = shell_command(cmd);
+        let mut command = maki_config::bash_command(cmd)?;
         command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -214,21 +214,6 @@ impl JobStore {
     }
 }
 
-fn shell_command(cmd: &str) -> Command {
-    #[cfg(unix)]
-    {
-        let mut c = Command::new("bash");
-        c.arg("-c").arg(cmd);
-        c
-    }
-    #[cfg(windows)]
-    {
-        let mut c = Command::new("cmd.exe");
-        c.arg("/C").arg(cmd);
-        c
-    }
-}
-
 fn kill_job(meta: &mut JobMeta) {
     let pid = meta.pid;
     #[cfg(unix)]
@@ -254,8 +239,9 @@ fn kill_job(meta: &mut JobMeta) {
 }
 
 /// Run a shell command in the background. The command runs through
-/// `bash -c` on Unix or `cmd /C` on Windows. You get back a job id
-/// that you can pass to `jobstop` or `jobwait` to control the process.
+/// `bash -c` on all platforms. On Windows, you need Git Bash or WSL
+/// installed. You get back a job id that you can pass to `jobstop`
+/// or `jobwait` to control the process.
 ///
 /// @param cmd string Shell command to run.
 /// @param opts table? Optional settings:

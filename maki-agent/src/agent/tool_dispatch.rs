@@ -783,4 +783,44 @@ mod tests {
             );
         });
     }
+
+    #[test]
+    fn local_tool_progress_keywords_returned_unchanged() {
+        smol::block_on(async {
+            const PROGRESS_TEXT: &str = "Building project... 100% complete ==> Done";
+            let ctx = local_ctx("progress", |_| Ok(PROGRESS_TEXT.to_string()));
+            let done = run(
+                ToolRegistry::global(),
+                None,
+                "t1".into(),
+                "progress",
+                &serde_json::json!({}),
+                &ctx,
+                Emit::Silent,
+            )
+            .await;
+            assert!(!done.is_error);
+            assert_eq!(done.output.as_text(), PROGRESS_TEXT);
+        });
+    }
+
+    #[test]
+    fn local_tool_error_preserves_message_unchanged() {
+        smol::block_on(async {
+            const ERROR_MSG: &str = "100% failed";
+            let ctx = local_ctx("fail", |_| Err(ERROR_MSG.to_string()));
+            let done = run(
+                ToolRegistry::global(),
+                None,
+                "t1".into(),
+                "fail",
+                &serde_json::json!({}),
+                &ctx,
+                Emit::Silent,
+            )
+            .await;
+            assert!(done.is_error);
+            assert_eq!(done.output.as_text(), ERROR_MSG);
+        });
+    }
 }

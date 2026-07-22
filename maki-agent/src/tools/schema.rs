@@ -1008,4 +1008,123 @@ mod tests {
         let schema = try_from_json(&schema_json).unwrap();
         assert!(validate(schema, input).is_ok());
     }
+
+    #[test]
+    fn to_json_schema_never_emits_additional_properties() {
+        const ANY_SCHEMA: ParamSchema = ParamSchema::Any { description: "" };
+        let any_json = to_json_schema(&ANY_SCHEMA);
+        assert!(any_json.get("additionalProperties").is_none());
+
+        let array_json = to_json_schema(&EDITS_ARRAY);
+        assert!(array_json.get("additionalProperties").is_none());
+
+        let object_json = to_json_schema(&MULTIEDIT_LIKE);
+        assert!(object_json.get("additionalProperties").is_none());
+
+        assert!(
+            object_json["properties"]["edits"]["items"]
+                .get("additionalProperties")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn try_from_json_ignores_additional_properties_field() {
+        let schema_json = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "path": { "type": "string" }
+            }
+        });
+        let schema = try_from_json(&schema_json);
+        assert!(schema.is_ok());
+    }
+
+    #[test]
+    fn validate_drops_unknown_keys_top_level() {
+        const SCHEMA: ParamSchema = ParamSchema::Object {
+            properties: &[("name", &STR_PRIM, true, &[])],
+            description: "",
+        };
+        let out = validate(&SCHEMA, json!({"name": "x", "unknown": 42})).unwrap();
+        assert!(out.get("unknown").is_none());
+        assert_eq!(out["name"], "x");
+    }
+
+    #[test]
+    fn validate_drops_unknown_keys_nested() {
+        const NESTED_SCHEMA: ParamSchema = ParamSchema::Object {
+            properties: &[("config", &MULTIEDIT_LIKE, true, &[])],
+            description: "",
+        };
+        let input = json!({
+            "config": {
+                "path": "/x",
+                "edits": [{"old_string": "a", "new_string": "b"}],
+                "unknown_field": "drop_me"
+            }
+        });
+        let out = validate(&NESTED_SCHEMA, input).unwrap();
+        assert!(out["config"].get("unknown_field").is_none());
+        assert_eq!(out["config"]["path"], "/x");
+    }
+
+    #[test]
+    fn validate_drops_unknown_keys_after_roundtrip() {
+        const SCHEMA: ParamSchema = ParamSchema::Object {
+            properties: &[("name", &STR_PRIM, true, &[])],
+            description: "",
+        };
+        let json_schema = to_json_schema(&SCHEMA);
+        let recovered = try_from_json(&json_schema).unwrap();
+        let out = validate(recovered, json!({"name": "x", "dropped": 99})).unwrap();
+        assert!(out.get("dropped").is_none());
+    }
+
+    #[test]
+    fn validate_preserves_required_fields() {
+        const SCHEMA: ParamSchema = ParamSchema::Object {
+            properties: &[
+                ("name", &STR_PRIM, true, &[]),
+                ("optional", &STR_PRIM, false, &[]),
+            ],
+            description: "",
+        };
+        let out = validate(&SCHEMA, json!({"name": "x", "optional": "y"})).unwrap();
+        assert_eq!(out["name"], "x");
+        assert_eq!(out["optional"], "y");
+    }
+
+    #[test]
+    fn validate_rejects_missing_required_with_correct_path() {
+        const SCHEMA: ParamSchema = ParamSchema::Object {
+            properties: &[("name", &STR_PRIM, true, &[])],
+            description: "",
+        };
+        let err = validate(&SCHEMA, json!({})).unwrap_err();
+        assert_eq!(err.path.to_string(), "name");
+        assert!(matches!(err.kind, ToolInputErrorKind::Missing { .. }));
+    }
+
+    #[test]
+    fn roundtrip_validates_same_inputs() {
+        const SCHEMA: ParamSchema = ParamSchema::Object {
+            properties: &[
+                ("name", &STR_PRIM, true, &[]),
+                ("count", &BOOL_PRIM, false, &[]),
+            ],
+            description: "",
+        };
+        let json_schema = to_json_schema(&SCHEMA);
+        let recovered = try_from_json(&json_schema).unwrap();
+
+        let good_input = json!({"name": "test", "count": true});
+        assert!(validate(&SCHEMA, good_input.clone()).is_ok());
+        assert!(validate(recovered, good_input).is_ok());
+
+        let bad_input = json!({"name": "test", "count": "not_bool"});
+        assert!(validate(&SCHEMA, bad_input.clone()).is_err());
+        assert!(validate(recovered, bad_input).is_err());
+    }
 }

@@ -23,7 +23,8 @@ const TRUNCATION_SUFFIX: &str = "...";
 /// Truncate a string to at most `max_len` characters on a word boundary.
 /// If truncated, appends an ellipsis indicator.
 pub fn truncate_on_word_boundary(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    let char_count = s.chars().count();
+    if char_count <= max_len {
         return s.to_string();
     }
 
@@ -32,21 +33,26 @@ pub fn truncate_on_word_boundary(s: &str, max_len: usize) -> String {
         return TRUNCATION_SUFFIX.to_string();
     }
 
-    let truncate_at = max_len - suffix_len;
+    let target_chars = max_len - suffix_len;
     let mut last_space = None;
 
-    for (i, ch) in s.char_indices() {
-        if i >= truncate_at {
+    for (char_idx, (byte_idx, ch)) in s.char_indices().enumerate() {
+        if char_idx >= target_chars {
             break;
         }
         if ch.is_whitespace() {
-            last_space = Some(i);
+            last_space = Some(byte_idx);
         }
     }
 
-    let cut_pos = last_space.unwrap_or(truncate_at);
+    let cut_pos = last_space.unwrap_or_else(|| {
+        s.char_indices()
+            .nth(target_chars)
+            .map(|(i, _)| i)
+            .unwrap_or(s.len())
+    });
     let truncated = &s[..cut_pos];
-    format!("{}{}", truncated.trim(), TRUNCATION_SUFFIX)
+    format!("{}{}", truncated.trim_end(), TRUNCATION_SUFFIX)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

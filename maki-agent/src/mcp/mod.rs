@@ -651,13 +651,13 @@ fn publish(
                     },
                 );
 
-                let description = if t.description.len() > max_desc_chars {
-                    let original_len = t.description.len();
+                let description_chars = t.description.chars().count();
+                let description = if description_chars > max_desc_chars {
                     let truncated = truncate_on_word_boundary(&t.description, max_desc_chars);
                     warn!(
                         tool = %t.qualified_name,
-                        original_len,
-                        truncated_len = truncated.len(),
+                        original_len = description_chars,
+                        truncated_len = truncated.chars().count(),
                         max_len = max_desc_chars,
                         "truncated MCP tool description"
                     );

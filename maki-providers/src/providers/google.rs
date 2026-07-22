@@ -38,17 +38,13 @@ fn max_thinking(model: &Model) -> u32 {
     model.max_thinking_budget().map_or(cap, |m| m.min(cap))
 }
 
-fn tools_hash(tools: &Value) -> u64 {
+fn tools_hash(tools: &Value) -> Result<u64, AgentError> {
     let mut hasher = DefaultHasher::new();
-    let json_str = match serde_json::to_string(tools) {
-        Ok(s) => s,
-        Err(e) => {
-            warn!(error = %e, "failed to serialize tools for hashing");
-            return 0;
-        }
-    };
+    let json_str = serde_json::to_string(tools).map_err(|e| AgentError::Config {
+        message: format!("failed to serialize tools for hashing: {e}"),
+    })?;
     hasher.write(json_str.as_bytes());
-    hasher.finish()
+    Ok(hasher.finish())
 }
 
 #[derive(Clone, Debug)]
@@ -356,7 +352,15 @@ impl Provider for Google {
         session_id: Option<&'a SessionRef>,
     ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
         Box::pin(async move {
-            let current_tools_hash = tools_hash(tools);
+            let current_tools_hash = match tools_hash(tools) {
+                Ok(h) => h,
+                Err(e) => {
+                    warn!(error = %e, "failed to hash tools, falling back to uncached request");
+                    return self
+                        .do_stream(model, messages, system, tools, event_tx, opts.thinking)
+                        .await;
+                }
+            };
             let current_message_count = messages.len();
 
             let Some(sid) = session_id else {
@@ -1211,8 +1215,8 @@ mod tests {
     #[test]
     fn tools_hash_is_deterministic() {
         let tools = json!([{"name": "bash", "input_schema": {"type": "object"}}]);
-        let hash1 = tools_hash(&tools);
-        let hash2 = tools_hash(&tools);
+        let hash1 = tools_hash(&tools).expect("tools hash must succeed");
+        let hash2 = tools_hash(&tools).expect("tools hash must succeed");
         assert_eq!(hash1, hash2);
     }
 
@@ -1220,6 +1224,9 @@ mod tests {
     fn tools_hash_differs_for_different_tools() {
         let tools1 = json!([{"name": "bash", "input_schema": {"type": "object"}}]);
         let tools2 = json!([{"name": "read", "input_schema": {"type": "object"}}]);
-        assert_ne!(tools_hash(&tools1), tools_hash(&tools2));
+        assert_ne!(
+            tools_hash(&tools1).expect("tools hash must succeed"),
+            tools_hash(&tools2).expect("tools hash must succeed")
+        );
     }
 }

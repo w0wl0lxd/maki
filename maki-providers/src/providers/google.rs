@@ -26,6 +26,7 @@ const ENV_VAR: &str = "GEMINI_API_KEY";
 const FLASH_MAX_THINKING: u32 = 24_576;
 const PRO_MAX_THINKING: u32 = 32_768;
 const CACHE_PREFIX_LEN: usize = 3;
+const CACHE_TTL: Duration = Duration::from_secs(8 * 60 * 60);
 
 /// The generic per-model max, capped by Google's documented `thinkingBudget`
 /// hard limits per family.
@@ -52,19 +53,23 @@ struct CachedContentState {
     name: String,
     tools_hash: u64,
     message_count: usize,
+    expires_at: Instant,
 }
 
 impl CachedContentState {
-    fn new(name: String, tools_hash: u64, message_count: usize) -> Self {
+    fn new(name: String, tools_hash: u64, message_count: usize, expires_at: Instant) -> Self {
         Self {
             name,
             tools_hash,
             message_count,
+            expires_at,
         }
     }
 
     fn is_valid(&self, tools_hash: u64, message_count: usize) -> bool {
-        self.tools_hash == tools_hash && message_count >= self.message_count
+        self.tools_hash == tools_hash
+            && message_count >= self.message_count
+            && Instant::now() < self.expires_at
     }
 }
 
@@ -244,6 +249,10 @@ impl Google {
             body["tools"] = json!([{"functionDeclarations": tool_decls}]);
         }
 
+        body["expiration"] = json!({
+            "ttl": format!("{}s", CACHE_TTL.as_secs()),
+        });
+
         let json_body = serde_json::to_vec(&body)?;
         let request = self
             .build_request("POST", &url)
@@ -413,6 +422,7 @@ impl Provider for Google {
                                 name.clone(),
                                 current_tools_hash,
                                 current_message_count,
+                                Instant::now() + CACHE_TTL,
                             ),
                         );
                         name
@@ -1205,11 +1215,19 @@ mod tests {
 
     #[test]
     fn cached_content_state_valid_when_tools_and_count_match() {
-        let state = CachedContentState::new("cache1".to_string(), 123, 5);
+        let future = Instant::now() + Duration::from_secs(3600);
+        let state = CachedContentState::new("cache1".to_string(), 123, 5, future);
         assert!(state.is_valid(123, 5));
         assert!(state.is_valid(123, 6));
         assert!(!state.is_valid(124, 5));
         assert!(!state.is_valid(123, 4));
+    }
+
+    #[test]
+    fn cached_content_state_invalid_after_expiry() {
+        let past = Instant::now() - Duration::from_secs(1);
+        let state = CachedContentState::new("cache1".to_string(), 123, 5, past);
+        assert!(!state.is_valid(123, 5));
     }
 
     #[test]

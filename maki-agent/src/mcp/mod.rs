@@ -958,7 +958,12 @@ mod tests {
             assert_eq!(tools[0]["name"], WIRE_TOOL_NAME);
 
             handle_toggle(&mut inner, "srv", false).await;
-            publish(&inner, &handle.index, &handle.snapshot, inner.max_desc_chars);
+            publish(
+                &inner,
+                &handle.index,
+                &handle.snapshot,
+                inner.max_desc_chars,
+            );
 
             let entry = &inner.entries[0];
             assert_eq!(t.shutdowns(), 1);

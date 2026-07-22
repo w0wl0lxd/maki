@@ -158,7 +158,7 @@ impl InputBox {
         self.handle_paste(&spaced)
     }
 
-    pub fn new(history: InputHistory) -> Self {
+    pub fn new(history: InputHistory, max_input_lines: u32) -> Self {
         Self {
             buffer: TextBuffer::new(String::new()),
             history,
@@ -168,12 +168,8 @@ impl InputBox {
             follow_cursor: true,
             placeholder_hint: random_placeholder_hint(),
             pending_images: Vec::new(),
-            max_input_lines: DEFAULT_MAX_INPUT_LINES as u16,
+            max_input_lines: max_input_lines.clamp(1, u16::MAX as u32 - BORDER_LINES as u32) as u16,
         }
-    }
-
-    pub fn set_max_input_lines(&mut self, max: u32) {
-        self.max_input_lines = max.clamp(1, u16::MAX as u32 - BORDER_LINES as u32) as u16;
     }
 
     pub fn copy_text(&self) -> String {
@@ -631,7 +627,7 @@ mod tests {
 
     #[test]
     fn submit() {
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         assert!(input.submit().is_none());
 
         type_text(&mut input, " ");
@@ -651,13 +647,13 @@ mod tests {
 
     #[test]
     fn backslash_continuation() {
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         type_text(&mut input, "hello\\");
         assert!(input.char_before_cursor_is_backslash());
         input.continue_line();
         assert_eq!(input.buffer.lines(), &["hello", ""]);
 
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         type_text(&mut input, "asd\\asd");
         for _ in 0..3 {
             input.buffer.move_left();
@@ -671,7 +667,7 @@ mod tests {
 
     #[test]
     fn height_capped_at_max() {
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         let base = input.height(TEST_WIDTH);
         for _ in 0..20 {
             input.buffer.add_line();
@@ -682,18 +678,7 @@ mod tests {
 
     #[test]
     fn height_respects_configured_max() {
-        let mut input = InputBox::new(InputHistory::default());
-        input.set_max_input_lines(3);
-        for _ in 0..10 {
-            input.buffer.add_line();
-        }
-        assert_eq!(input.height(TEST_WIDTH), 3 + 2);
-    }
-
-    #[test]
-    fn height_respects_configured_max() {
-        let mut input = InputBox::new(InputHistory::default());
-        input.set_max_input_lines(3);
+        let mut input = InputBox::new(InputHistory::default(), 3);
         for _ in 0..10 {
             input.buffer.add_line();
         }
@@ -702,7 +687,7 @@ mod tests {
 
     #[test]
     fn first_last_line() {
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         assert!(input.is_at_first_line());
         assert!(input.is_at_last_line());
 
@@ -717,7 +702,7 @@ mod tests {
 
     #[test]
     fn history() {
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
 
         input.history_up();
         input.history_down();
@@ -780,10 +765,10 @@ mod tests {
         let width: u16 = 12;
         let ew = effective_width(width as usize);
 
-        let mut at_boundary = InputBox::new(InputHistory::default());
+        let mut at_boundary = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         type_text(&mut at_boundary, &"x".repeat(ew));
 
-        let mut before_boundary = InputBox::new(InputHistory::default());
+        let mut before_boundary = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         type_text(&mut before_boundary, &"x".repeat(ew - 1));
 
         assert_eq!(
@@ -836,17 +821,21 @@ mod tests {
     #[test_case(20, true  ; "visible_when_content_overflows")]
     #[test_case(0,  false ; "hidden_when_content_fits")]
     fn scrollbar_visibility(extra_lines: usize, expect_visible: bool) {
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         for _ in 0..extra_lines {
             input.buffer.add_line();
         }
-        let terminal = render_input(&mut input, 40, DEFAULT_MAX_INPUT_LINES as u16 + BORDER_LINES);
+        let terminal = render_input(
+            &mut input,
+            40,
+            DEFAULT_MAX_INPUT_LINES as u16 + BORDER_LINES,
+        );
         assert_eq!(has_scrollbar_thumb(&terminal), expect_visible);
     }
 
     #[test]
     fn scroll_clamped_on_content_shrink() {
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         for _ in 0..20 {
             input.buffer.add_line();
         }
@@ -862,7 +851,7 @@ mod tests {
 
     #[test]
     fn multibyte_input_renders_without_panic() {
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         type_text(&mut input, "● grep> hello");
         input.buffer.move_home();
         input.buffer.move_right();
@@ -873,7 +862,7 @@ mod tests {
     #[test_case("●\\", true  ; "after_multibyte")]
     #[test_case("●", false   ; "inside_multibyte_would_be_false")]
     fn char_before_cursor_backslash(input: &str, expected: bool) {
-        let mut input_box = InputBox::new(InputHistory::default());
+        let mut input_box = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         type_text(&mut input_box, input);
         assert_eq!(input_box.char_before_cursor_is_backslash(), expected);
     }
@@ -892,7 +881,7 @@ mod tests {
 
     #[test]
     fn prefix_on_single_line() {
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         type_text(&mut input, "hello");
         let terminal = render_input(&mut input, 20, 4);
         let row = rendered_row(&terminal, 1);
@@ -902,7 +891,7 @@ mod tests {
 
     #[test]
     fn prefix_on_multiline() {
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         type_text(&mut input, "aaa");
         input.buffer.add_line();
         type_text(&mut input, "bbb");
@@ -915,7 +904,7 @@ mod tests {
 
     #[test]
     fn wrapped_line_gets_no_padding() {
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         let ew = effective_width(14);
         type_text(&mut input, &"x".repeat(ew + 3));
         let terminal = render_input(&mut input, 14, 5);
@@ -934,10 +923,10 @@ mod tests {
 
     #[test]
     fn copy_text_includes_prefix() {
-        let input = InputBox::new(InputHistory::default());
+        let input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         assert_eq!(input.copy_text(), CHEVRON);
 
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         type_text(&mut input, "line1");
         input.buffer.add_line();
         type_text(&mut input, "line2");
@@ -946,7 +935,7 @@ mod tests {
 
     #[test]
     fn placeholder_has_prefix() {
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         let terminal = render_input(&mut input, 40, 4);
         let row = rendered_row(&terminal, 1);
         assert!(row.starts_with(CHEVRON), "placeholder row: {row:?}");
@@ -960,7 +949,7 @@ mod tests {
 
     #[test]
     fn submit_with_images() {
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
 
         input.attach_image(test_image());
         let sub = input.submit().unwrap();
@@ -979,7 +968,7 @@ mod tests {
 
     #[test]
     fn image_label_rendered() {
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         input.attach_image(test_image());
         let h = input.height(40);
         let terminal = render_input(&mut input, 40, h);
@@ -989,7 +978,7 @@ mod tests {
 
     #[test]
     fn height_accounts_for_pending_images() {
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         let base_height = input.height(TEST_WIDTH);
         input.attach_image(test_image());
         assert_eq!(input.height(TEST_WIDTH), base_height + 1);
@@ -1007,7 +996,7 @@ mod tests {
     #[test_case("$(cmd)", "src/main.rs", " src/main.rs" ; "leading_after_closing_paren")]
     #[test_case("arr[0]", "src/main.rs", " src/main.rs" ; "leading_after_closing_bracket")]
     fn paste_with_spaces_leading(before: &str, paste: &str, expected_suffix: &str) {
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         type_text(&mut input, before);
         input.handle_paste_with_spaces(paste);
         assert_eq!(input.buffer.value(), format!("{before}{expected_suffix}"));
@@ -1019,7 +1008,7 @@ mod tests {
     #[test_case("in  between", 3, "file.rs", "in file.rs between" ; "neither_side_between_spaces")]
     #[test_case("read ''", 6, "src/main.rs", "read 'src/main.rs'" ; "neither_side_between_quotes")]
     fn paste_with_spaces_at_cursor(before: &str, cursor_at: usize, paste: &str, expected: &str) {
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         type_text(&mut input, before);
         let back = before.chars().count() - cursor_at;
         for _ in 0..back {
@@ -1031,14 +1020,14 @@ mod tests {
 
     #[test]
     fn paste_with_spaces_empty_line() {
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         input.handle_paste_with_spaces("file.rs");
         assert_eq!(input.buffer.value(), "file.rs");
     }
 
     #[test]
     fn paste_with_spaces_text_has_leading_space() {
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         type_text(&mut input, "read");
         input.handle_paste_with_spaces(" file.rs");
         assert_eq!(input.buffer.value(), "read file.rs");
@@ -1046,7 +1035,7 @@ mod tests {
 
     #[test]
     fn paste_with_spaces_text_has_trailing_space() {
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         type_text(&mut input, "file");
         for _ in 0..4 {
             input.buffer.move_left();
@@ -1057,7 +1046,7 @@ mod tests {
 
     #[test]
     fn paste_with_spaces_multiline_buffer_cursor_on_second_line() {
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         input.handle_paste("first\nread");
         input.handle_paste_with_spaces("file.rs");
         assert_eq!(input.buffer.value(), "first\nread file.rs");
@@ -1065,7 +1054,7 @@ mod tests {
 
     #[test]
     fn paste_with_spaces_cursor_at_end_no_trailing() {
-        let mut input = InputBox::new(InputHistory::default());
+        let mut input = InputBox::new(InputHistory::default(), DEFAULT_MAX_INPUT_LINES);
         type_text(&mut input, "read");
         input.handle_paste_with_spaces("file.rs");
         assert_eq!(input.buffer.value(), "read file.rs");

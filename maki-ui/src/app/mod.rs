@@ -203,8 +203,10 @@ impl App {
     ) -> Self {
         scrollbar::set_enabled(ui_config.scrollbar);
         let state = SessionState::from_session(session, model, &storage);
-        let mut input_box = InputBox::new(InputHistory::load(&storage, input_history_size));
-        input_box.set_max_input_lines(ui_config.max_input_lines);
+        let input_box = InputBox::new(
+            InputHistory::load(&storage, input_history_size),
+            ui_config.max_input_lines,
+        );
         let mut app = Self {
             chats: vec![Chat::new("Main".into(), ui_config)],
             active_chat: 0,

@@ -16,7 +16,7 @@ use maki_config::{PermissionsConfig, UiConfig};
 use maki_lua::{HintReader, KeymapReader, LuaCommandReader};
 use maki_providers::{ContentBlock, Effort, Role, TokenUsage};
 use maki_storage::sessions::{StoredMode, StoredThinking};
-use ratatui::layout::Rect;
+use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -3146,6 +3146,10 @@ fn ctrl_click_subagent_card_header_enters_chat(tool: &str) {
     let area = Rect::new(0, 0, 80, 80);
     set_zone(&mut app, SelectionZone::Messages, area);
 
+    let mut terminal = Terminal::new(TestBackend::new(80, 80)).unwrap();
+    terminal.draw(|frame| app.view(frame)).unwrap();
+    let msg_area = app.msg_area();
+
     let ctrl_click = |app: &mut App, row| {
         app.update(Msg::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -3161,7 +3165,7 @@ fn ctrl_click_subagent_card_header_enters_chat(tool: &str) {
         }));
     };
 
-    ctrl_click(&mut app, area.y);
+    ctrl_click(&mut app, msg_area.y);
     assert_eq!(
         app.active_chat, 1,
         "{tool} ctrl+header click must enter the subagent chat"

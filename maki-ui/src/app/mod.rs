@@ -713,21 +713,7 @@ impl App {
         }
 
         if !self.is_main_chat() {
-            return match key.code {
-                KeyCode::Tab if !self.is_bash_input() => self.toggle_mode(),
-                KeyCode::Esc if !self.chats[self.active_chat].is_finished() => {
-                    if let Some(t) = self.last_esc.take()
-                        && t.elapsed() < self.status_bar.flash_duration
-                    {
-                        self.handle_subagent_cancel()
-                    } else {
-                        self.last_esc = Some(Instant::now());
-                        self.status_bar.flash(FLASH_CANCEL.into());
-                        vec![]
-                    }
-                }
-                _ => vec![],
-            };
+            return self.handle_subagent_chat_key(key);
         }
 
         self.handle_main_chat_key(key)
@@ -745,6 +731,44 @@ impl App {
             }
         }
         false
+    }
+
+    fn handle_subagent_chat_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        if key.code == KeyCode::Tab && !self.is_bash_input() {
+            return self.toggle_mode();
+        }
+        if key.code == KeyCode::Esc && self.chats[self.active_chat].is_finished() {
+            self.active_chat = 0;
+            self.last_esc = None;
+            return vec![];
+        }
+        if key.code == KeyCode::Left {
+            self.active_chat = 0;
+            self.last_esc = None;
+            return vec![];
+        }
+        if key.code != KeyCode::Esc {
+            self.last_esc = None;
+        }
+
+        match self.input_box.handle_key(key) {
+            InputAction::Submit(sub) => self.handle_submit(sub),
+            InputAction::Passthrough(key) if key.code == KeyCode::Esc => {
+                if let Some(t) = self.last_esc.take()
+                    && t.elapsed() < self.status_bar.flash_duration
+                {
+                    self.handle_subagent_cancel()
+                } else {
+                    self.last_esc = Some(Instant::now());
+                    self.status_bar.flash(FLASH_CANCEL.into());
+                    vec![]
+                }
+            }
+            InputAction::Passthrough(_)
+            | InputAction::ContinueLine
+            | InputAction::PaletteSync(_)
+            | InputAction::None => vec![],
+        }
     }
 
     fn handle_main_chat_key(&mut self, key: KeyEvent) -> Vec<Action> {
@@ -1155,6 +1179,12 @@ impl App {
     fn resolve_or_create_chat(&mut self, subagent: &SubagentInfo) -> usize {
         let id = &subagent.parent_tool_use_id;
         if let Some(&idx) = self.chat_index.get(id.as_str()) {
+            if let Some(ref tx) = subagent.answer_tx {
+                self.subagent_answers.insert(id.clone(), tx.clone());
+            }
+            if let Some(ref tx) = subagent.prompt_tx {
+                self.subagent_prompts.insert(id.clone(), tx.clone());
+            }
             return idx;
         }
         let idx = self.chats.len();

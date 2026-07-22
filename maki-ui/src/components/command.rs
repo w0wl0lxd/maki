@@ -53,11 +53,6 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         max_args: 0,
     },
     BuiltinCommand {
-        name: "/sessions",
-        description: "Browse and switch sessions",
-        max_args: 0,
-    },
-    BuiltinCommand {
         name: "/model",
         description: "Switch model",
         max_args: 0,
@@ -94,7 +89,7 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     },
     BuiltinCommand {
         name: "/thinking",
-        description: "Toggle extended thinking (off, adaptive, or budget)",
+        description: "Toggle extended thinking (off, adaptive, effort level, or budget)",
         max_args: 1,
     },
     BuiltinCommand {
@@ -110,6 +105,11 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     BuiltinCommand {
         name: "/exit",
         description: "Exit the application",
+        max_args: 0,
+    },
+    BuiltinCommand {
+        name: "/reload",
+        description: "Reload plugins and config",
         max_args: 0,
     },
 ];
@@ -872,7 +872,6 @@ mod tests {
     #[test_case("/cmp", "/compact" ; "compact_fuzzy")]
     #[test_case("/new", "/new" ; "new_exact")]
     #[test_case("/tsk", "/tasks" ; "tasks_fuzzy")]
-    #[test_case("/sess", "/sessions" ; "sessions_prefix")]
     fn nucleo_highlights_matching_indices(input: &str, expected_cmd: &str) {
         let p = synced(input);
         assert!(p.is_active(), "Input '{}' should activate palette", input);

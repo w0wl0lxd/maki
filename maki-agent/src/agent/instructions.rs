@@ -91,9 +91,7 @@ fn collect_instruction_files(
     let mut out = Vec::new();
 
     let ancestor_dirs: Vec<_> = find_project_ancestor_dirs(Path::new(cwd)).collect();
-    let has_git_root = ancestor_dirs
-        .iter()
-        .any(|dir| dir.join(".git").exists());
+    let has_git_root = ancestor_dirs.iter().any(|dir| dir.join(".git").exists());
     let project_dirs = if has_git_root {
         ancestor_dirs
     } else {
@@ -104,12 +102,17 @@ fn collect_instruction_files(
     for dir in project_dirs.into_iter().rev() {
         for filename in INSTRUCTION_FILES {
             if let Some((canonical, content)) = read_instruction(&dir.join(filename), loaded) {
-                out.push((format!("Project instructions ({})", canonical.display()), content));
+                out.push((
+                    format!("Project instructions ({})", canonical.display()),
+                    content,
+                ));
                 break;
             }
         }
 
-        if let Some((canonical, content)) = read_instruction(&dir.join(LOCAL_INSTRUCTION_FILE), loaded) {
+        if let Some((canonical, content)) =
+            read_instruction(&dir.join(LOCAL_INSTRUCTION_FILE), loaded)
+        {
             out.push((
                 format!("Local instructions ({})", canonical.display()),
                 content,

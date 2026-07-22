@@ -4,7 +4,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::shell::parse_shell_prefix;
 use crate::highlight;
-use crate::text_buffer::{is_newline_key, EditResult, TextBuffer};
+use crate::text_buffer::{EditResult, TextBuffer, is_newline_key};
 use crate::theme;
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -12,11 +12,11 @@ use maki_storage::input_history::InputHistory;
 use std::mem;
 
 use maki_providers::ImageSource;
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
-use ratatui::Frame;
 
 use super::scrollbar::render_vertical_scrollbar;
 use super::{apply_scroll_delta, visual_line_count};

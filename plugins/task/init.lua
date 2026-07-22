@@ -12,9 +12,13 @@ local STRUCTURED_OUTPUT_NAME = "structured_output"
 local STRUCTURED_OUTPUT_DESCRIPTION = "Report your final result. Call it exactly once when your task is complete."
 local STRUCTURED_OUTPUT_ACK = "Output recorded."
 local STRUCTURED_OUTPUT_PROMPT_SUFFIX = "\n\nWhen finished, call the structured_output tool with your final result."
+local DONE_NAME = "done"
+local DONE_DESCRIPTION = "Call when the task is complete with your final answer."
+local DONE_PROMPT_SUFFIX = "\n\nWhen finished, call the done tool with your final answer."
 local MAX_STRUCTURED_RETRIES = 2
 local MAX_SCHEMA_ERRORS = 3
 local SCHEMA_COMPILE_ERROR = "invalid output_schema"
+local SCHEMA_ROOT_ERROR = "output_schema must have type object"
 local STRUCTURED_MISSING_ERROR = "subagent finished without calling structured_output"
 local STRUCTURED_INVALID_ERROR = "subagent result does not match output_schema"
 local NUDGE_MISSING =
@@ -132,6 +136,9 @@ local function handler(input, ctx)
   -- Compile early: a bad schema costs zero tokens.
   local validator
   if input.output_schema then
+    if type(input.output_schema) ~= "table" or input.output_schema.type ~= "object" then
+      return { llm_output = SCHEMA_ROOT_ERROR, is_error = true }
+    end
     local compile_err
     validator, compile_err = maki.json.schema_validator(input.output_schema)
     if compile_err then
@@ -182,6 +189,23 @@ local function handler(input, ctx)
         end,
       },
     }
+  else
+    local_tools = {
+      [DONE_NAME] = {
+        description = DONE_DESCRIPTION,
+        input_schema = {
+          type = "object",
+          properties = {
+            answer = { type = "string", description = "Final answer to return to the parent agent." },
+          },
+          required = { "answer" },
+        },
+        handler = function(value)
+          captured = value.answer
+          return "Done."
+        end,
+      },
+    }
   end
 
   local preview = make_preview(ctx, input.description or "task")
@@ -218,6 +242,8 @@ local function handler(input, ctx)
         local message = input.prompt
         if validator then
           message = message .. STRUCTURED_OUTPUT_PROMPT_SUFFIX
+        else
+          message = message .. DONE_PROMPT_SUFFIX
         end
         local result, err = sess:prompt(message)
         local retries = 0
@@ -232,7 +258,13 @@ local function handler(input, ctx)
           local msg = last_errors and (STRUCTURED_INVALID_ERROR .. ":\n" .. last_errors) or STRUCTURED_MISSING_ERROR
           return { llm_output = msg, is_error = true }
         end
-        return { llm_output = captured and maki.json.encode(captured) or result.text, format = "markdown" }
+        if captured then
+          if type(captured) == "string" then
+            return { llm_output = captured, format = "markdown" }
+          end
+          return { llm_output = maki.json.encode(captured), format = "markdown" }
+        end
+        return { llm_output = result.text, format = "markdown" }
       end
 
       local function do_poll()

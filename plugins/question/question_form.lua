@@ -35,7 +35,17 @@ local function split_at(s, max_cols)
     return s, ""
   end
   local t = maki.ui.truncate_text(s, max_cols)
-  return t.head, t.tail
+  local head, tail = t.head, t.tail
+  -- truncate_text already force-takes the first char when max_cols is smaller
+  -- than its width, but guard against an empty head here so wrap_spans always
+  -- makes forward progress (e.g. a single wide glyph in a 1-cell column).
+  if max_cols > 0 and head == "" then
+    local next_pos = utf8.offset(s, 2)
+    local len = next_pos and next_pos - 1 or #s
+    head = s:sub(1, len)
+    tail = s:sub(len + 1)
+  end
+  return head, tail
 end
 
 local function wrap_spans(spans, max_width)

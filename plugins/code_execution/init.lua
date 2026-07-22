@@ -15,14 +15,14 @@ local SEPARATOR = "──────"
 local PREAMBLE = "import re\nimport asyncio\nimport sys\nimport os\nimport json\n"
 local TOOLS_HEADER = "\n\nAvailable tools (called as Python functions with keyword arguments):\n"
 local WORKFLOW_TOOLS_NOTE =
-  "\nWorkflow mode: orchestrate subagents from this script. Await every `task(...)` call and use `asyncio.gather` for parallel fan-out. Pass `output_schema` to task for machine-readable results (a JSON string, parse with `json.loads`). Raise this tool's `timeout` param: subagents outlive the default code_execution timeout.\n"
+  "\nWorkflow mode: orchestrate subagents from this script. Await every `task(...)` call and use `asyncio.gather` for parallel fan-out. Pass `output_schema` to task for machine-readable results (a JSON string, parse with `json.loads`).\n"
 local PY_TYPES = { string = "str", integer = "int", boolean = "bool", array = "list" }
 
 local opts = maki.api.register_options(output_limits.extend({
   timeout_secs = {
     default = 30,
     min = 5,
-    desc = "Stop the script after this many seconds. A call's `timeout` param overrides it.",
+    desc = "Script execution time budget in seconds; waiting on tool calls does not count. A call's `timeout` param overrides it.",
   },
   max_memory_mb = { default = 50, min = 10, desc = "Memory limit for the Python sandbox (MB)." },
 }))
@@ -81,7 +81,7 @@ local function build_body(ctx, code)
 end
 
 local description =
-  [[Execute Python code in a sandboxed interpreter with tools as callable functions. Use for chained/dependent tool calls and filtering/processing results. Faster than sequential tool calls. Tools are async: `result = await read(path='file.txt')`. Use `asyncio.gather()` for concurrency. Available libs: re, asyncio, sys, os, json. Fresh sandbox each run. 30s timeout (configurable).]]
+  [[Execute Python code in a sandboxed interpreter with tools as callable functions. Use for chained/dependent tool calls and filtering/processing results. Faster than sequential tool calls. Tools are async: `result = await read(path='file.txt')`. Use `asyncio.gather()` for concurrency. Available libs: re, asyncio, sys, os, json. Fresh sandbox each run. 30s script timeout (`timeout` param); time awaiting tool calls doesn't count.]]
 
 local schema = {
   type = "object",
@@ -94,7 +94,7 @@ local schema = {
     },
     timeout = {
       type = "integer",
-      description = "Timeout in seconds (default 30, max 300)",
+      description = "Script execution timeout in seconds (default 30)",
     },
   },
 }
@@ -195,8 +195,6 @@ local function handler(input, ctx)
   ctx:live_buf(buf)
   maki.async.run(highlight)
 
-  ctx:set_deadline(timeout)
-
   view:append({ { "Waiting for output...", "dim" } })
 
   local waiting = true
@@ -211,8 +209,9 @@ local function handler(input, ctx)
   local tools = {}
   for _, t in ipairs(interpreter_tools(maki.api.get_tools({ config = config }), ctx:audience(), ctx:workflow())) do
     local name = t.name
+    local call_opts = t.workflow_only and {} or { timeout = timeout }
     tools[name] = function(tool_input)
-      return maki.agent.call_tool(ctx, name, tool_input, { timeout = timeout })
+      return maki.agent.call_tool(ctx, name, tool_input, call_opts)
     end
   end
 

@@ -65,6 +65,7 @@ use maki_storage::model::persist_model;
 
 use crate::storage_writer::StorageWriter;
 use ratatui::layout::Position;
+use ratatui_image::picker::Picker;
 
 pub(crate) use crate::agent::QueuedMessage;
 pub(crate) use mode::{Mode, PlanState, PlanTrigger};
@@ -187,6 +188,7 @@ pub struct App {
     pub(crate) shell: shell::ShellState,
     pub(crate) ui_config: UiConfig,
     pub(crate) permissions: Arc<PermissionManager>,
+    pub(crate) picker: Arc<Picker>,
     pub(crate) lua_event_handle: Option<EventHandle>,
     pub(super) keymap_reader: KeymapReader,
     pub(super) hint_reader: HintReader,
@@ -213,6 +215,7 @@ impl App {
         input_history_size: usize,
         permissions: Arc<PermissionManager>,
         custom_commands: Arc<[maki_agent::command::CustomCommand]>,
+        picker: Arc<Picker>,
     ) -> Self {
         scrollbar::set_enabled(ui_config.scrollbar);
         let state = SessionState::from_session(session, model, &storage);
@@ -221,7 +224,11 @@ impl App {
         let typewriter = ui_config.typewriter_ms_per_char;
         let flash = ui_config.flash_duration();
         let mut app = Self {
-            chats: vec![Chat::new("Main".into(), ui_config.clone())],
+            chats: vec![Chat::new(
+                "Main".into(),
+                ui_config.clone(),
+                Arc::clone(&picker),
+            )],
             active_chat: 0,
             chat_index: HashMap::new(),
             input_box,
@@ -270,6 +277,7 @@ impl App {
             shell: shell::ShellState::default(),
             ui_config,
             permissions,
+            picker,
             lua_event_handle: None,
             keymap_reader,
             hint_reader,
@@ -1231,7 +1239,11 @@ impl App {
         if let Some(ref model) = subagent.model {
             self.chats[0].update_tool_model(id, model);
         }
-        let mut chat = Chat::new(subagent.name.clone(), self.ui_config.clone());
+        let mut chat = Chat::new(
+            subagent.name.clone(),
+            self.ui_config.clone(),
+            Arc::clone(&self.picker),
+        );
         chat.tool_use_id = Some(id.clone());
         chat.set_restore_channel(self.lua_event_handle.clone(), self.restore_event_tx.clone());
         chat.model_id = subagent.model.clone();

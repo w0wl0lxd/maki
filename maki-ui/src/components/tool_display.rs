@@ -799,6 +799,7 @@ mod tests {
         output: Option<ToolOutput>,
     ) -> DisplayMessage {
         DisplayMessage {
+            images: Vec::new(),
             role: DisplayRole::Tool(Box::new(ToolRole {
                 id: "t1".into(),
                 status,
@@ -937,6 +938,7 @@ mod tests {
 
     fn task_msg(output: String) -> DisplayMessage {
         DisplayMessage {
+            images: Vec::new(),
             role: DisplayRole::Tool(Box::new(ToolRole {
                 id: "t1".into(),
                 status: ToolStatus::Success,
@@ -1032,6 +1034,7 @@ mod tests {
 
     fn index_msg(body: &str) -> DisplayMessage {
         DisplayMessage {
+            images: Vec::new(),
             role: DisplayRole::Tool(Box::new(ToolRole {
                 id: "t1".into(),
                 status: ToolStatus::Success,
@@ -1072,6 +1075,7 @@ mod tests {
 
     fn snapshot_msg(snapshot: BufferSnapshot) -> DisplayMessage {
         DisplayMessage {
+            images: Vec::new(),
             role: DisplayRole::Tool(Box::new(ToolRole {
                 id: "t1".into(),
                 status: ToolStatus::Success,
@@ -1200,6 +1204,7 @@ mod tests {
 
     fn error_snapshot_msg(snapshot_lines: &[&str], output: &str) -> DisplayMessage {
         DisplayMessage {
+            images: Vec::new(),
             role: DisplayRole::Tool(Box::new(ToolRole {
                 id: "t1".into(),
                 status: ToolStatus::Error,
@@ -1385,6 +1390,7 @@ mod tests {
             )
         };
         DisplayMessage {
+            images: Vec::new(),
             role: DisplayRole::Tool(Box::new(ToolRole {
                 id: "t1".into(),
                 status,
@@ -1480,6 +1486,7 @@ mod tests {
     ) -> DisplayMessage {
         let lines: Vec<String> = (0..line_count).map(|i| format!("{prefix} {i}")).collect();
         DisplayMessage {
+            images: Vec::new(),
             role: DisplayRole::Tool(Box::new(ToolRole {
                 id: "t1".into(),
                 status: ToolStatus::Success,
@@ -1609,6 +1616,7 @@ mod tests {
             annotation: None,
             plan_path: None,
             timestamp: None,
+            images: Vec::new(),
             turn_usage: None,
             truncated_lines: 0,
             render_snapshot: Some(snapshot),
@@ -1648,6 +1656,7 @@ mod tests {
             annotation: None,
             plan_path: None,
             timestamp: None,
+            images: Vec::new(),
             turn_usage: None,
             truncated_lines: 0,
             render_snapshot: Some(snapshot),

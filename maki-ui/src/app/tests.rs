@@ -3205,3 +3205,35 @@ fn typing_in_running_subagent_routes_prompt_to_that_agent() {
 
     assert_eq!(prompt_rx.try_recv().unwrap(), "follow");
 }
+
+#[test]
+fn typing_in_finished_subagent_flashes_explanation() {
+    let mut app = test_app();
+    app.status = Status::Streaming;
+    app.run_id = 1;
+    let (prompt_tx, prompt_rx) = flume::bounded::<String>(32);
+    app.update(subagent_msg(
+        AgentEvent::TextDelta {
+            text: "running".into(),
+        },
+        "task1",
+        Some("research"),
+    ));
+    let info = subagent_info_with_channels("task1", "task1", "research", None, Some(prompt_tx));
+    app.handle_agent_event(Envelope {
+        event: AgentEvent::TextDelta { text: "x".into() },
+        subagent: Some(info),
+        run_id: 1,
+    });
+    app.active_chat = 1;
+    finish_subagent_task(&mut app, false);
+
+    app.update(Msg::Key(key(KeyCode::Char('h'))));
+    app.update(Msg::Key(key(KeyCode::Enter)));
+
+    assert_eq!(
+        app.status_bar.flash_text(),
+        Some(STEERING_UNAVAILABLE_MSG)
+    );
+    assert!(prompt_rx.try_recv().is_err());
+}

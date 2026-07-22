@@ -384,11 +384,17 @@ impl App {
     }
 
     fn send_subagent_prompt(&mut self, subagent_id: &str, message: String) -> bool {
+        let Some(&idx) = self.chat_index.get(subagent_id) else {
+            return false;
+        };
+        if self.chats[idx].is_finished() {
+            return false;
+        }
         let sent = self
             .subagent_prompts
             .get(subagent_id)
             .is_some_and(|tx| tx.try_send(message.clone()).is_ok());
-        if sent && let Some(&idx) = self.chat_index.get(subagent_id) {
+        if sent {
             self.chats[idx].show_user_message(message);
         }
         sent
@@ -902,9 +908,7 @@ impl App {
             let Some(tool_use_id) = subagent_id else {
                 return vec![];
             };
-            if self.subagent_prompts.contains_key(&tool_use_id) {
-                self.send_subagent_prompt(&tool_use_id, sub.text);
-            } else {
+            if !self.send_subagent_prompt(&tool_use_id, sub.text) {
                 self.flash(STEERING_UNAVAILABLE_MSG.into());
             }
             return vec![];
@@ -1022,6 +1026,8 @@ impl App {
             if let Some(&sub_idx) = self.chat_index.get(tool_use_id.as_str()) {
                 self.chats[sub_idx].mark_finished(DisplayRole::Done, DONE_TEXT);
             }
+            self.subagent_answers.remove(&tool_use_id);
+            self.subagent_prompts.remove(&tool_use_id);
             self.state
                 .session
                 .subagent_messages
@@ -1058,6 +1064,8 @@ impl App {
                     (DisplayRole::Done, DONE_TEXT)
                 };
                 self.chats[sub_idx].mark_finished(role, text);
+                self.subagent_answers.remove(&e.id);
+                self.subagent_prompts.remove(&e.id);
             }
         }
 

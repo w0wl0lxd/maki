@@ -247,6 +247,14 @@ fn lines_remaining_after(total: usize, start_line: usize, shown: usize) -> usize
 }
 
 impl ToolOutput {
+    fn grep_summary(entries: &[GrepFileEntry]) -> String {
+        let matches: usize = entries.iter().map(|e| e.match_count()).sum();
+        let files = entries.len();
+        let match_word = if matches == 1 { "match" } else { "matches" };
+        let file_word = if files == 1 { "file" } else { "files" };
+        format!("{matches} {match_word} in {files} {file_word}")
+    }
+
     /// Short header suffix summarizing the output, e.g. `12 lines`.
     /// The UI uses it on tool completion, and `maki.agent.call_tool` falls
     /// back to it when the tool's reply has no annotation of its own.
@@ -263,12 +271,7 @@ impl ToolOutput {
                 }
             }
             Self::WriteCode { byte_count, .. } => Some(format!("{byte_count} bytes")),
-            Self::GrepResult { entries } => {
-                let matches: usize = entries.iter().map(|e| e.match_count()).sum();
-                let files = entries.len();
-                let f = if files == 1 { "file" } else { "files" };
-                Some(format!("{matches} matches in {files} {f}"))
-            }
+            Self::GrepResult { entries } => Some(Self::grep_summary(entries)),
             Self::ReadDir(t) => {
                 let n = t.text.lines().count();
                 Some(format!("{n} entries"))
@@ -315,16 +318,11 @@ impl ToolOutput {
                 instructions: None,
                 state: None,
             }),
-            Self::GrepResult { entries } => {
-                let matches: usize = entries.iter().map(|e| e.match_count()).sum();
-                let files = entries.len();
-                let f = if files == 1 { "file" } else { "files" };
-                Self::Plain(TextOutput {
-                    text: format!("{matches} matches in {files} {f}"),
-                    instructions: None,
-                    state: None,
-                })
-            }
+            Self::GrepResult { entries } => Self::Plain(TextOutput {
+                text: Self::grep_summary(entries),
+                instructions: None,
+                state: None,
+            }),
             Self::Diff { summary, .. } => Self::Plain(TextOutput {
                 text: summary.clone(),
                 instructions: None,
@@ -949,7 +947,7 @@ mod tests {
     #[test_case(ToolOutput::ReadCode { path: "a.rs".into(), start_line: 1, lines: vec!["x".into(); 5], total_lines: 5, instructions: None }, Some("5 lines") ; "read_code_full_file")]
     #[test_case(ToolOutput::ReadCode { path: "a.rs".into(), start_line: 10, lines: vec!["x".into(); 5], total_lines: 100, instructions: None }, Some("5 of 100 lines") ; "read_code_partial")]
     #[test_case(ToolOutput::WriteCode { path: "a.rs".into(), byte_count: 99, lines: vec![] }, Some("99 bytes") ; "write_code_bytes")]
-    #[test_case(ToolOutput::GrepResult { entries: vec![GrepFileEntry { path: "a.rs".into(), groups: vec![GrepMatchGroup::single(1, "hit")] }] }, Some("1 matches in 1 file") ; "grep_file_count")]
+    #[test_case(ToolOutput::GrepResult { entries: vec![GrepFileEntry { path: "a.rs".into(), groups: vec![GrepMatchGroup::single(1, "hit")] }] }, Some("1 match in 1 file") ; "grep_file_count")]
     #[test_case(ToolOutput::Diff { path: "a.rs".into(), before: String::new(), after: String::new(), summary: "ok".into() }, None ; "diff_no_annotation")]
     fn annotation_cases(output: ToolOutput, expected: Option<&str>) {
         assert_eq!(output.annotation().as_deref(), expected);
@@ -958,7 +956,7 @@ mod tests {
     #[test_case(ToolOutput::ReadCode { path: "a.rs".into(), start_line: 1, lines: vec!["x".into(); 5], total_lines: 5, instructions: None }, "5 lines from a.rs" ; "read_code_full_file_summary")]
     #[test_case(ToolOutput::ReadCode { path: "a.rs".into(), start_line: 10, lines: vec!["x".into(); 5], total_lines: 100, instructions: None }, "5 of 100 lines from a.rs" ; "read_code_partial_summary")]
     #[test_case(ToolOutput::WriteCode { path: "a.rs".into(), byte_count: 99, lines: vec![] }, "wrote 99 bytes to a.rs" ; "write_code_summary")]
-    #[test_case(ToolOutput::GrepResult { entries: vec![GrepFileEntry { path: "a.rs".into(), groups: vec![GrepMatchGroup::single(1, "hit")] }] }, "1 matches in 1 file" ; "grep_single_file_summary")]
+    #[test_case(ToolOutput::GrepResult { entries: vec![GrepFileEntry { path: "a.rs".into(), groups: vec![GrepMatchGroup::single(1, "hit")] }] }, "1 match in 1 file" ; "grep_single_file_summary")]
     #[test_case(ToolOutput::GrepResult { entries: vec![GrepFileEntry { path: "a.rs".into(), groups: vec![GrepMatchGroup::single(1, "hit")] }, GrepFileEntry { path: "b.rs".into(), groups: vec![GrepMatchGroup::single(2, "hit2")] }] }, "2 matches in 2 files" ; "grep_multiple_files_summary")]
     #[test_case(ToolOutput::Diff { path: "a.rs".into(), before: "old".into(), after: "new".into(), summary: "changed 2 lines".into() }, "changed 2 lines" ; "diff_summary")]
     #[test_case(ToolOutput::Plain("ok".into()), "ok" ; "plain_passthrough")]

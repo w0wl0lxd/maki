@@ -694,6 +694,49 @@
       left: 0.55rem;
       color: oklch(75% 0.1 280);
     }
+    .player-hint {
+      margin-top: 0.6rem;
+      text-align: center;
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+    }
+    .player-hint button {
+      background: none;
+      border: none;
+      padding: 0;
+      font: inherit;
+      font-weight: 700;
+      color: var(--navy-light);
+      text-decoration: underline;
+      text-underline-offset: 3px;
+      cursor: pointer;
+    }
+    .player-hint button:hover {
+      color: var(--deep-navy);
+    }
+
+    /* ── DOOM DEMO ── */
+    .doom-demo {
+      max-width: 820px;
+      margin: 3rem auto 0;
+    }
+    .doom-line {
+      text-align: center;
+      font-size: 1.15rem;
+      font-weight: 800;
+      color: var(--deep-navy);
+      margin-bottom: 1rem;
+    }
+    .doom-demo .tui { display: block; }
+    .doom-demo .tui-body { min-width: 0; min-height: 0; }
+    .doom-video {
+      display: block;
+      width: 100%;
+      height: auto;
+      aspect-ratio: 1920 / 970;
+      background: #000;
+      cursor: pointer;
+    }
 
 
     /* ── PROVIDERS ── */
@@ -1254,6 +1297,7 @@
   </div>
 
   <div class="hero-preview">
+    <div class="tui-scale-wrap">
     <div class="tui">
       <div class="tui-titlebar">
         <div class="tui-dot tui-dot-r"></div>
@@ -1286,6 +1330,8 @@
         </div>
       </div>
     </div>
+    </div>
+    <p class="player-hint"><button type="button" id="skip-hint-btn">Skip to 1:07</button> to see the snake game Opus 4.6 created</p>
   </div>
   </div>
 </section>
@@ -1536,6 +1582,33 @@ imports = <span class="fn">set</span>()
     <span class="fn">win:close</span>()
   <span class="kw">end</span>,
 })</pre>
+        </div>
+      </div>
+    </div>
+
+    <div class="doom-demo reveal">
+      <p class="doom-line">And yes... it can even run DOOM!</p>
+      <div class="tui">
+        <div class="tui-titlebar">
+          <div class="tui-dot tui-dot-r"></div>
+          <div class="tui-dot tui-dot-y"></div>
+          <div class="tui-dot tui-dot-g"></div>
+        </div>
+        <div class="tui-body">
+          <video class="doom-video" width="1920" height="970" muted loop playsinline preload="none" aria-label="maki running DOOM through a Lua plugin">
+            <source src="doom-av1.mp4" type="video/mp4; codecs=av01.0.04M.08">
+            <source src="doom.mp4" type="video/mp4">
+          </video>
+          <div class="player-controls">
+            <button class="player-btn doom-play-btn" aria-label="Play/Pause">
+              <svg viewBox="0 0 24 24" class="doom-play-icon"><path d="M8 5v14l11-7z"/></svg>
+              <svg viewBox="0 0 24 24" class="doom-pause-icon" style="display:none"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+            </button>
+            <div class="player-progress doom-progress">
+              <div class="player-progress-bar doom-progress-fill"></div>
+            </div>
+            <span class="player-time doom-time">0:00 / 0:00</span>
+          </div>
         </div>
       </div>
     </div>
@@ -1872,8 +1945,76 @@ imports = <span class="fn">set</span>()
     });
   });
 
+  document.getElementById('skip-hint-btn').addEventListener('click', () => {
+    player.seek(67);
+    player.play();
+  });
+
   // Start progress updates
   progressRaf = requestAnimationFrame(updateProgress);
+
+  // DOOM demo player
+  (() => {
+    const demo = document.querySelector('.doom-demo');
+    if (!demo) return;
+    const video = demo.querySelector('.doom-video');
+    const dPlayIcon = demo.querySelector('.doom-play-icon');
+    const dPauseIcon = demo.querySelector('.doom-pause-icon');
+    const dProgress = demo.querySelector('.doom-progress');
+    const dFill = demo.querySelector('.doom-progress-fill');
+    const dTime = demo.querySelector('.doom-time');
+    let userPaused = false;
+
+    function render() {
+      const d = video.duration || 0;
+      dFill.style.width = d ? (video.currentTime / d * 100) + '%' : '0%';
+      dTime.textContent = `${formatTime(video.currentTime)} / ${formatTime(d)}`;
+    }
+    video.addEventListener('timeupdate', render);
+    video.addEventListener('loadedmetadata', render);
+    video.addEventListener('play', () => {
+      dPlayIcon.style.display = 'none';
+      dPauseIcon.style.display = 'block';
+    });
+    video.addEventListener('pause', () => {
+      dPlayIcon.style.display = 'block';
+      dPauseIcon.style.display = 'none';
+    });
+
+    function toggle() {
+      if (video.paused) {
+        userPaused = false;
+        video.play();
+      } else {
+        userPaused = true;
+        video.pause();
+      }
+    }
+    demo.querySelector('.doom-play-btn').addEventListener('click', toggle);
+    video.addEventListener('click', toggle);
+
+    dProgress.addEventListener('click', (e) => {
+      const rect = dProgress.getBoundingClientRect();
+      const pct = (e.clientX - rect.left) / rect.width;
+      video.currentTime = pct * (video.duration || 0);
+      render();
+    });
+
+    new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) {
+        if (!userPaused) video.play().catch(() => {});
+      } else if (!video.paused) {
+        video.pause();
+      }
+    }, { threshold: 0.35 }).observe(video);
+
+    window.addEventListener('load', () => {
+      if (video.readyState === 0 && video.paused) {
+        video.preload = 'auto';
+        video.load();
+      }
+    }, { once: true });
+  })();
 </script>
 
 </body>

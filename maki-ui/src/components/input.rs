@@ -23,6 +23,7 @@ use super::{apply_scroll_delta, visual_line_count};
 use crate::selection::LineBreaks;
 use maki_config::DEFAULT_MAX_INPUT_LINES;
 
+const BORDER_LINES: u16 = 2;
 const CHEVRON: &str = super::CHEVRON;
 const NEWLINE_PAD: &str = "  ";
 const PREFIX_WIDTH: u16 = 2;
@@ -172,7 +173,7 @@ impl InputBox {
     }
 
     pub fn set_max_input_lines(&mut self, max: u32) {
-        self.max_input_lines = max.clamp(1, u16::MAX as u32 - 2) as u16;
+        self.max_input_lines = max.clamp(1, u16::MAX as u32 - BORDER_LINES as u32) as u16;
     }
 
     pub fn copy_text(&self) -> String {
@@ -205,7 +206,7 @@ impl InputBox {
             visual_lines += 1;
         }
         let capped = visual_lines.min(self.max_input_lines as usize);
-        (capped + 2) as u16
+        (capped + BORDER_LINES as usize) as u16
     }
 
     pub fn is_at_first_line(&self) -> bool {
@@ -326,7 +327,7 @@ impl InputBox {
         focused: bool,
         top_right_hint: Option<Line<'_>>,
     ) {
-        let content_height = area.height.saturating_sub(2);
+        let content_height = area.height.saturating_sub(BORDER_LINES);
         let ew = effective_width(area.width as usize);
 
         if self.follow_cursor {
@@ -676,7 +677,17 @@ mod tests {
             input.buffer.add_line();
         }
         assert!(input.height(TEST_WIDTH) > base);
-        assert!(input.height(TEST_WIDTH) <= DEFAULT_MAX_INPUT_LINES as u16 + 2);
+        assert!(input.height(TEST_WIDTH) <= DEFAULT_MAX_INPUT_LINES as u16 + BORDER_LINES);
+    }
+
+    #[test]
+    fn height_respects_configured_max() {
+        let mut input = InputBox::new(InputHistory::default());
+        input.set_max_input_lines(3);
+        for _ in 0..10 {
+            input.buffer.add_line();
+        }
+        assert_eq!(input.height(TEST_WIDTH), 3 + 2);
     }
 
     #[test]
@@ -829,7 +840,7 @@ mod tests {
         for _ in 0..extra_lines {
             input.buffer.add_line();
         }
-        let terminal = render_input(&mut input, 40, DEFAULT_MAX_INPUT_LINES as u16 + 2);
+        let terminal = render_input(&mut input, 40, DEFAULT_MAX_INPUT_LINES as u16 + BORDER_LINES);
         assert_eq!(has_scrollbar_thumb(&terminal), expect_visible);
     }
 

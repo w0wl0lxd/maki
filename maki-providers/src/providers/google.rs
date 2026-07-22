@@ -20,6 +20,19 @@ use super::{KeyPool, ResolvedAuth, http_client, next_sse_line};
 
 const BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 const ENV_VAR: &str = "GEMINI_API_KEY";
+const FLASH_MAX_THINKING: u32 = 24_576;
+const PRO_MAX_THINKING: u32 = 32_768;
+
+/// The generic per-model max, capped by Google's documented `thinkingBudget`
+/// hard limits per family.
+fn max_thinking(model: &Model) -> u32 {
+    let cap = if model.id.contains("flash") {
+        FLASH_MAX_THINKING
+    } else {
+        PRO_MAX_THINKING
+    };
+    model.max_thinking_budget().map_or(cap, |m| m.min(cap))
+}
 
 inventory::submit!(maki_config::providers::BuiltInProvider {
     slug: "google",
@@ -33,7 +46,7 @@ inventory::submit!(maki_config::providers::BuiltInProvider {
     needs_url: false,
 });
 
-pub(crate) fn models() -> &'static [ModelEntry] {
+pub(crate) const fn models() -> &'static [ModelEntry] {
     &[
         ModelEntry {
             prefixes: &["gemini-2.5-pro"],
@@ -177,10 +190,10 @@ impl Google {
             body["systemInstruction"] = json!({"parts": [{"text": system}]});
         }
 
-        thinking.apply_google_thinking(&mut body);
+        thinking.apply_google_thinking(&mut body, max_thinking(model));
 
-        if model.max_output_tokens > 0 {
-            body["generationConfig"]["maxOutputTokens"] = json!(model.max_output_tokens);
+        if let Some(max_output) = model.max_output_tokens {
+            body["generationConfig"]["maxOutputTokens"] = json!(max_output);
         }
 
         let tool_decls = convert_tools(tools);
@@ -615,15 +628,14 @@ mod tests {
     fn test_model() -> Model {
         Model {
             id: "gemini-2.5-flash".into(),
-            provider: crate::provider::ProviderKind::Google,
-            dynamic_slug: None,
+            provider: Arc::<str>::from("google"),
             tier: ModelTier::Medium,
             family: ModelFamily::Gemini,
             supports_vision_override: Some(true),
             supports_tool_examples_override: None,
             supports_thinking_override: None,
             pricing: ModelPricing::default(),
-            max_output_tokens: 8192,
+            max_output_tokens: Some(8192),
             context_window: 1_048_576,
         }
     }
@@ -677,9 +689,10 @@ mod tests {
             ThinkingConfig::Budget(8192),
         );
 
+        // Clamped to the model's max thinking budget (half of 8192 output tokens).
         assert_eq!(
             body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
-            8192
+            4096
         );
     }
 

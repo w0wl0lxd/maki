@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::{debug, warn};
 
+use super::anthropic::shared;
 use super::openai::responses;
 use super::openai_compat;
 use crate::model::{Model, ModelEntry, ModelFamily, ModelPricing, ModelTier};
@@ -39,7 +40,7 @@ const RESPONSES_PATH: &str = "/responses";
 const MESSAGES_PATH: &str = "/v1/messages";
 const MODELS_PATH: &str = "/models";
 
-pub(crate) fn models() -> &'static [ModelEntry] {
+pub(crate) const fn models() -> &'static [ModelEntry] {
     &[
         ModelEntry {
             prefixes: &["gpt-5-mini", "gpt-5 mini", "claude-haiku-4.5"],
@@ -285,13 +286,13 @@ impl Copilot {
         let auth = self.auth().await?;
         let mut body = json!({
             "model": model.id,
-            "max_tokens": model.max_output_tokens,
+            "max_tokens": model.max_output_tokens.unwrap_or(shared::FALLBACK_MAX_TOKENS),
             "system": [{"type": "text", "text": system}],
             "messages": anthropic_messages(messages),
             "tools": tools,
             "stream": true,
         });
-        thinking.apply_to_body(&mut body, &model.id);
+        thinking.apply_to_body(&mut body, model);
 
         let request = self
             .build_post(&auth, MESSAGES_PATH, Some("conversation-agent"), &body)?

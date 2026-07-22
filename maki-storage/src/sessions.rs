@@ -9,9 +9,12 @@
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::time::UNIX_EPOCH;
 
 use tracing::warn;
 
@@ -26,6 +29,9 @@ const LOG_FORMAT_VERSION: u32 = 2;
 pub const SESSIONS_DIR: &str = "sessions";
 const CWD_INDEX_FILE: &str = "cwd_latest.json";
 const CWD_INDEX_STEM: &str = "cwd_latest";
+const SCAN_CACHE_FILE: &str = "scan_cache.json";
+const SCAN_CACHE_STEM: &str = "scan_cache";
+const NON_SESSION_STEMS: [&str; 2] = [CWD_INDEX_STEM, SCAN_CACHE_STEM];
 const DEFAULT_TITLE: &str = "New session";
 const MAX_TITLE_LEN: usize = 60;
 
@@ -128,6 +134,7 @@ pub struct Session<M, U, T> {
     pub updated_at: u64,
 }
 
+#[derive(Serialize)]
 pub struct SessionSummary {
     pub id: MakiId,
     pub title: String,
@@ -158,10 +165,113 @@ pub struct StoredRule {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ThinkingParseError {
-    #[error("unknown thinking value {0:?} (use off, adaptive, or a token budget)")]
+    #[error(
+        "unknown thinking value {0:?} (use off, adaptive, minimal, low, medium, high, xhigh, max, or a token budget)"
+    )]
     Unknown(String),
     #[error("thinking budget must be greater than zero")]
     BudgetZero,
+}
+
+/// Floor for every token budget sent to a provider; some APIs reject smaller values.
+pub const MIN_THINKING_BUDGET: u32 = 1024;
+
+/// Thinking effort level. Declaration order is intensity order: the `Ord`
+/// derive and [`Effort::ALL`] rely on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl Effort {
+    pub const ALL: [Self; 6] = [
+        Self::Minimal,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
+    /// Percentage of the model's max thinking budget this level spends.
+    pub const fn percent(self) -> u32 {
+        match self {
+            Self::Minimal => 10,
+            Self::Low => 20,
+            Self::Medium => 40,
+            Self::High => 60,
+            Self::XHigh => 80,
+            Self::Max => 100,
+        }
+    }
+
+    /// `percent` of `max`, clamped to `[MIN_THINKING_BUDGET, max]`.
+    /// A `max` below the floor is raised to it.
+    pub fn budget(self, max: u32) -> u32 {
+        let max = max.max(MIN_THINKING_BUDGET);
+        let tokens = (u64::from(max) * u64::from(self.percent()) / 100) as u32;
+        tokens.clamp(MIN_THINKING_BUDGET, max)
+    }
+
+    /// Inverse of [`Self::budget`]: the lowest level whose percentage covers
+    /// `n` tokens out of `max`. Budgets at or above `max` map to `Max`.
+    pub fn from_budget(n: u32, max: u32) -> Self {
+        let pct = u64::from(n).saturating_mul(100) / u64::from(max.max(1));
+        Self::ALL
+            .into_iter()
+            .find(|e| u64::from(e.percent()) >= pct)
+            .unwrap_or(Self::Max)
+    }
+
+    /// Nearest level a provider accepts: exact match keeps `self`, otherwise
+    /// the closest lower supported level, otherwise the lowest supported.
+    /// An empty `supported` list returns `self` unchanged (dynamic model
+    /// listings may not declare supported efforts).
+    pub fn snap(self, supported: &[Self]) -> Self {
+        if supported.is_empty() || supported.contains(&self) {
+            return self;
+        }
+        supported
+            .iter()
+            .rev()
+            .find(|&&e| e < self)
+            .copied()
+            .unwrap_or(supported[0])
+    }
+}
+
+impl fmt::Display for Effort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Effort {
+    type Err = ThinkingParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|e| e.as_str() == s)
+            .ok_or_else(|| ThinkingParseError::Unknown(s.to_string()))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,19 +279,27 @@ pub enum ThinkingParseError {
 pub enum StoredThinking {
     Off,
     Adaptive,
+    Effort { level: Effort },
     Budget { tokens: u32 },
 }
 
 impl StoredThinking {
+    /// The one string-to-thinking parser: `/thinking`, `always_thinking`
+    /// config, and the Lua agent API all delegate here.
     pub fn parse_setting(input: &str) -> Result<Self, ThinkingParseError> {
         match input.trim() {
             "off" => Ok(Self::Off),
             "adaptive" => Ok(Self::Adaptive),
-            other => match other.parse::<u32>() {
-                Ok(0) => Err(ThinkingParseError::BudgetZero),
-                Ok(n) => Ok(Self::Budget { tokens: n }),
-                Err(_) => Err(ThinkingParseError::Unknown(other.to_string())),
-            },
+            other => {
+                if let Ok(level) = other.parse::<Effort>() {
+                    return Ok(Self::Effort { level });
+                }
+                match other.parse::<u32>() {
+                    Ok(0) => Err(ThinkingParseError::BudgetZero),
+                    Ok(n) => Ok(Self::Budget { tokens: n }),
+                    Err(_) => Err(ThinkingParseError::Unknown(other.to_string())),
+                }
+            }
         }
     }
 }
@@ -209,15 +327,22 @@ pub trait TitleSource {
     fn first_user_text(&self) -> Option<&str>;
 }
 
+/// A pasted code block bakes `\n` into a title and skews width-based padding
+/// in single-line UI like the picker, so every title entry point calls this.
+pub fn normalize_title(title: &str) -> String {
+    title.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub fn generate_title<M: TitleSource>(messages: &[M]) -> String {
     let first_user_text = messages.iter().find_map(|m| m.first_user_text());
 
     let Some(text) = first_user_text.map(str::trim).filter(|t| !t.is_empty()) else {
         return DEFAULT_TITLE.into();
     };
+    let text = normalize_title(text);
 
     if text.len() <= MAX_TITLE_LEN {
-        return text.to_string();
+        return text;
     }
 
     let boundary = text.floor_char_boundary(MAX_TITLE_LEN);
@@ -265,6 +390,9 @@ pub struct SessionLog {
     saved_msg_count: usize,
     saved_tool_ids: HashSet<String>,
     saved_sub_msg_counts: HashMap<String, usize>,
+    /// Serialized trailing meta record; lets `append` persist meta-only
+    /// changes (title, draft, updated_at) instead of dropping them.
+    saved_meta: Vec<u8>,
 }
 
 fn sub_msg_snapshot<M>(map: &HashMap<String, Vec<M>>) -> HashMap<String, usize> {
@@ -278,14 +406,11 @@ impl SessionLog {
         U: Serialize,
         T: Serialize,
     {
-        let log = Self::write_canonical(dir, session)?;
+        let file = write_session_file(dir, session)?;
         update_cwd_index(dir, &session.cwd, session.id)?;
-        Ok(log)
+        Ok(Self::cursor_from(session, file))
     }
 
-    /// Writes the canonical `{id}.jsonl` without touching the cwd→latest index.
-    /// Used by read-path migration, where merely opening an old session must not
-    /// repoint "latest" at it.
     fn write_canonical<M, U, T>(
         dir: &Path,
         session: &Session<M, U, T>,
@@ -295,12 +420,7 @@ impl SessionLog {
         U: Serialize,
         T: Serialize,
     {
-        fs::create_dir_all(dir).map_err(StorageError::from)?;
-        let path = jsonl_path(dir, session.id);
-        let mut file = File::create(&path).map_err(StorageError::from)?;
-        write_full_session(&mut file, session)?;
-        file.sync_data().map_err(StorageError::from)?;
-
+        let file = write_session_file(dir, session)?;
         Ok(Self::cursor_from(session, file))
     }
 
@@ -314,7 +434,25 @@ impl SessionLog {
         T: Serialize + DeserializeOwned,
     {
         let path = jsonl_path(dir, session_id);
-        let session = load_jsonl::<M, U, T>(&path)?;
+        let bytes = fs::read(&path).map_err(StorageError::from)?;
+        let valid = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+
+        if valid < bytes.len() {
+            warn!(
+                path = %path.display(),
+                bytes = bytes.len() - valid,
+                "truncating torn session log tail",
+            );
+            OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .map_err(StorageError::from)?
+                .set_len(valid as u64)
+                .map_err(StorageError::from)?;
+        }
+
+        let display = path.display().to_string();
+        let session = load_jsonl::<M, U, T>(&bytes[..valid], &display)?;
 
         let file = OpenOptions::new()
             .append(true)
@@ -383,28 +521,31 @@ impl SessionLog {
             }
         }
 
-        if buf.is_empty() {
+        let meta = meta_record(session)?;
+        if buf.is_empty() && meta == self.saved_meta {
             return Ok(());
         }
+        buf.extend_from_slice(&meta);
 
-        append_record(
-            &mut buf,
-            &LogRecord::<&M, &U, &T>::Meta {
-                title: session.title.clone(),
-                token_usage: &session.token_usage,
-                updated_at: session.updated_at,
-                meta: session.meta.clone(),
-            },
-        )?;
-
-        self.file.write_all(&buf).map_err(StorageError::from)?;
-        self.file.sync_data().map_err(StorageError::from)?;
+        let start = self.file.metadata().map_err(StorageError::from)?.len();
+        if let Err(e) = self
+            .file
+            .write_all(&buf)
+            .and_then(|()| self.file.sync_data())
+        {
+            // A failed write can leave partial bytes; roll back to the last
+            // record boundary so the file matches the unadvanced cursors and
+            // a retry appends cleanly instead of duplicating records.
+            let _ = self.file.set_len(start);
+            return Err(StorageError::from(e).into());
+        }
 
         self.saved_msg_count = new_msg_count;
         self.saved_tool_ids.extend(new_tool_ids);
         for (sub_id, count) in new_sub_counts {
             self.saved_sub_msg_counts.insert(sub_id, count);
         }
+        self.saved_meta = meta;
 
         Ok(())
     }
@@ -430,25 +571,29 @@ impl SessionLog {
 
         fs::rename(&tmp, &path).map_err(StorageError::from)?;
 
-        self.file = OpenOptions::new()
+        let file = OpenOptions::new()
             .append(true)
             .open(&path)
             .map_err(StorageError::from)?;
-        self.sync_cursors(session);
+        *self = Self::cursor_from(session, file);
 
         Ok(())
     }
 
-    fn cursor_from<M, U, T>(session: &Session<M, U, T>, file: File) -> Self {
-        let mut log = Self {
+    fn cursor_from<M, U, T>(session: &Session<M, U, T>, file: File) -> Self
+    where
+        M: Serialize,
+        U: Serialize,
+        T: Serialize,
+    {
+        Self {
             session_id: session.id,
             file,
-            saved_msg_count: 0,
-            saved_tool_ids: HashSet::new(),
-            saved_sub_msg_counts: HashMap::new(),
-        };
-        log.sync_cursors(session);
-        log
+            saved_msg_count: session.messages.len(),
+            saved_tool_ids: session.tool_outputs.keys().cloned().collect(),
+            saved_sub_msg_counts: sub_msg_snapshot(&session.subagent_messages),
+            saved_meta: meta_record(session).unwrap_or_default(),
+        }
     }
 
     fn require_same_id<M, U, T>(&self, session: &Session<M, U, T>) -> Result<(), SessionError> {
@@ -474,23 +619,39 @@ impl SessionLog {
                     .is_none_or(|msgs| count > msgs.len())
             })
     }
-
-    fn sync_cursors<M, U, T>(&mut self, session: &Session<M, U, T>) {
-        self.saved_msg_count = session.messages.len();
-        self.saved_tool_ids = session.tool_outputs.keys().cloned().collect();
-        self.saved_sub_msg_counts = sub_msg_snapshot(&session.subagent_messages);
-    }
 }
 
-fn write_record<R: Serialize>(
-    file: &mut File,
-    buf: &mut Vec<u8>,
-    record: &R,
-) -> Result<(), SessionError> {
-    buf.clear();
-    append_record(buf, record)?;
-    file.write_all(buf).map_err(StorageError::from)?;
-    Ok(())
+fn meta_record<M, U, T>(session: &Session<M, U, T>) -> Result<Vec<u8>, SessionError>
+where
+    M: Serialize,
+    U: Serialize,
+    T: Serialize,
+{
+    let mut buf = Vec::new();
+    append_record(
+        &mut buf,
+        &LogRecord::<&M, &U, &T>::Meta {
+            title: session.title.clone(),
+            token_usage: &session.token_usage,
+            updated_at: session.updated_at,
+            meta: session.meta.clone(),
+        },
+    )?;
+    Ok(buf)
+}
+
+fn write_session_file<M, U, T>(dir: &Path, session: &Session<M, U, T>) -> Result<File, SessionError>
+where
+    M: Serialize,
+    U: Serialize,
+    T: Serialize,
+{
+    fs::create_dir_all(dir).map_err(StorageError::from)?;
+    let path = jsonl_path(dir, session.id);
+    let mut file = File::create(&path).map_err(StorageError::from)?;
+    write_full_session(&mut file, session)?;
+    file.sync_data().map_err(StorageError::from)?;
+    Ok(file)
 }
 
 fn write_full_session<M, U, T>(
@@ -503,8 +664,7 @@ where
     T: Serialize,
 {
     let mut buf = Vec::new();
-    write_record(
-        file,
+    append_record(
         &mut buf,
         &LogRecord::<&M, &U, &T>::Header {
             v: LOG_FORMAT_VERSION,
@@ -515,11 +675,10 @@ where
         },
     )?;
     for msg in &session.messages {
-        write_record(file, &mut buf, &LogRecord::<&M, &U, &T>::Msg { d: msg })?;
+        append_record(&mut buf, &LogRecord::<&M, &U, &T>::Msg { d: msg })?;
     }
     for (id, output) in &session.tool_outputs {
-        write_record(
-            file,
+        append_record(
             &mut buf,
             &LogRecord::<&M, &U, &T>::Out {
                 id: id.clone(),
@@ -529,8 +688,7 @@ where
     }
     for (sub_id, msgs) in &session.subagent_messages {
         for msg in msgs {
-            write_record(
-                file,
+            append_record(
                 &mut buf,
                 &LogRecord::<&M, &U, &T>::SubMsg {
                     sub: sub_id.clone(),
@@ -539,16 +697,9 @@ where
             )?;
         }
     }
-    write_record(
-        file,
-        &mut buf,
-        &LogRecord::<&M, &U, &T>::Meta {
-            title: session.title.clone(),
-            token_usage: &session.token_usage,
-            updated_at: session.updated_at,
-            meta: session.meta.clone(),
-        },
-    )
+    buf.extend_from_slice(&meta_record(session)?);
+    file.write_all(&buf).map_err(StorageError::from)?;
+    Ok(())
 }
 
 fn append_record<R: Serialize>(buf: &mut Vec<u8>, record: &R) -> Result<(), SessionError> {
@@ -569,13 +720,12 @@ enum RawTag {
     Other,
 }
 
-fn load_jsonl<M, U, T>(path: &Path) -> Result<Session<M, U, T>, SessionError>
+fn load_jsonl<M, U, T>(data: &[u8], display_path: &str) -> Result<Session<M, U, T>, SessionError>
 where
     M: DeserializeOwned,
     U: DeserializeOwned + Default,
     T: DeserializeOwned,
 {
-    let reader = BufReader::new(File::open(path).map_err(StorageError::from)?);
     let mut line_count = 0usize;
 
     let mut id: Option<MakiId> = None;
@@ -591,31 +741,26 @@ where
     let mut meta = SessionMeta::default();
     let mut got_header = false;
 
-    for line_result in reader.lines() {
-        let line = line_result.map_err(StorageError::from)?;
+    for line in data.split(|&b| b == b'\n') {
         line_count += 1;
         if line.is_empty() {
             continue;
         }
-        let record: LogRecord<M, U, T> = match serde_json::from_str(&line) {
+        let record: LogRecord<M, U, T> = match serde_json::from_slice(line) {
             Ok(r) => r,
             Err(e) => {
-                // A header whose only defect is an unparseable id fails the
-                // strict LogRecord parse; surface that precisely instead of
-                // silently skipping to a misleading NotFound. The header is
-                // always the first line, so only probe until we have one.
                 if !got_header
-                    && let Ok(RawTag::Header { id: raw_id }) = serde_json::from_str::<RawTag>(&line)
+                    && let Ok(RawTag::Header { id: raw_id }) = serde_json::from_slice(line)
                     && let Err(source) = raw_id.parse::<MakiId>()
                 {
                     return Err(SessionError::CorruptHeaderId {
-                        path: path.display().to_string(),
+                        path: display_path.to_string(),
                         raw_id,
                         source,
                     });
                 }
                 warn!(
-                    path = %path.display(),
+                    path = display_path,
                     error = %e,
                     line = line_count,
                     "skipping unrecognized JSONL record",
@@ -664,7 +809,7 @@ where
         }
     }
 
-    let id = id.ok_or(StorageError::NotFound(path.display().to_string()))?;
+    let id = id.ok_or(StorageError::NotFound(display_path.to_string()))?;
 
     Ok(Session {
         version: SESSION_VERSION,
@@ -693,7 +838,11 @@ fn load_cwd_index(dir: &Path) -> HashMap<String, String> {
 
 fn update_cwd_index(dir: &Path, cwd: &str, session_id: MakiId) -> Result<(), StorageError> {
     let mut index = load_cwd_index(dir);
-    index.insert(cwd.to_string(), session_id.to_string());
+    let id_str = session_id.to_string();
+    if index.get(cwd).is_some_and(|v| *v == id_str) {
+        return Ok(());
+    }
+    index.insert(cwd.to_string(), id_str);
     atomic_write(&dir.join(CWD_INDEX_FILE), &serde_json::to_vec(&index)?)
 }
 
@@ -755,22 +904,96 @@ enum ScanRecord {
     Other,
 }
 
+/// Cached scan result for one session file, keyed by file name and validated
+/// by (size, mtime): stale entries are rescanned, deleted files pruned.
+/// `header: None` marks files that failed to scan (wrong version, foreign
+/// format), so they are not re-read on every list either.
+#[derive(Serialize, Deserialize)]
+struct ScanCacheEntry {
+    size: u64,
+    mtime_ms: u64,
+    header: Option<ScannedHeader>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ScannedHeader {
+    id: MakiId,
+    cwd: String,
+    title: String,
+    updated_at: u64,
+}
+
+type ScanCache = HashMap<String, ScanCacheEntry>;
+
+fn load_scan_cache(dir: &Path) -> ScanCache {
+    fs::read(dir.join(SCAN_CACHE_FILE))
+        .ok()
+        .and_then(|data| serde_json::from_slice(&data).ok())
+        .unwrap_or_default()
+}
+
+fn file_signature(path: &Path) -> Option<(u64, u64)> {
+    let meta = fs::metadata(path).ok()?;
+    let mtime_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)?;
+    Some((meta.len(), mtime_ms))
+}
+
 fn scan_headers(cwd: &str, dir: &Path) -> Result<Vec<SessionSummary>, StorageError> {
-    Ok(session_entries(dir)?
-        .into_iter()
-        .filter_map(|p| {
-            if is_jsonl(&p) {
-                scan_jsonl_header(cwd, &p)
-            } else {
-                scan_legacy_header(cwd, &p)
+    let mut cache = load_scan_cache(dir);
+    let mut fresh = ScanCache::new();
+    let mut dirty = false;
+    let mut out = Vec::new();
+    for path in session_entries(dir)? {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some((size, mtime_ms)) = file_signature(&path) else {
+            continue;
+        };
+        let entry = match cache.remove(name) {
+            Some(e) if e.size == size && e.mtime_ms == mtime_ms => e,
+            _ => {
+                dirty = true;
+                let header = if is_jsonl(&path) {
+                    scan_jsonl_header(&path)
+                } else {
+                    scan_legacy_header(&path)
+                };
+                ScanCacheEntry {
+                    size,
+                    mtime_ms,
+                    header,
+                }
             }
-        })
-        .collect())
+        };
+        if let Some(h) = &entry.header
+            && h.cwd == cwd
+        {
+            out.push(SessionSummary {
+                id: h.id,
+                title: normalize_title(&h.title),
+                updated_at: h.updated_at,
+            });
+        }
+        fresh.insert(name.to_owned(), entry);
+    }
+    // Leftover cache entries belong to deleted files; rewriting prunes them.
+    if (dirty || !cache.is_empty())
+        && let Ok(data) = serde_json::to_vec(&fresh)
+        && let Err(e) = atomic_write(&dir.join(SCAN_CACHE_FILE), &data)
+    {
+        warn!(error = %e, "failed to write session scan cache");
+    }
+    Ok(out)
 }
 
 const TAIL_BUF: u64 = 4096;
 
-fn scan_jsonl_header(cwd: &str, path: &Path) -> Option<SessionSummary> {
+fn scan_jsonl_header(path: &Path) -> Option<ScannedHeader> {
     let mut file = File::open(path).ok()?;
     let header: JsonlHeader = {
         let mut reader = BufReader::new(&file);
@@ -778,15 +1001,16 @@ fn scan_jsonl_header(cwd: &str, path: &Path) -> Option<SessionSummary> {
         reader.read_line(&mut line).ok()?;
         serde_json::from_str(line.trim_end()).ok()?
     };
-    if header.v != LOG_FORMAT_VERSION || header.cwd != cwd {
+    if header.v != LOG_FORMAT_VERSION {
         return None;
     }
 
     let (title, updated_at) =
         read_last_meta(&mut file).unwrap_or_else(|| (DEFAULT_TITLE.to_string(), 0));
 
-    Some(SessionSummary {
+    Some(ScannedHeader {
         id: header.id,
+        cwd: header.cwd,
         title,
         updated_at,
     })
@@ -816,14 +1040,15 @@ fn read_last_meta(file: &mut File) -> Option<(String, u64)> {
     }
 }
 
-fn scan_legacy_header(cwd: &str, path: &Path) -> Option<SessionSummary> {
+fn scan_legacy_header(path: &Path) -> Option<ScannedHeader> {
     let data = fs::read(path).ok()?;
     let h: LegacyHeader = serde_json::from_slice(&data).ok()?;
-    if h.version != SESSION_VERSION || h.cwd != cwd {
+    if h.version != SESSION_VERSION {
         return None;
     }
-    Some(SessionSummary {
+    Some(ScannedHeader {
         id: h.id,
+        cwd: h.cwd,
         title: h.title,
         updated_at: h.updated_at,
     })
@@ -839,7 +1064,9 @@ fn session_entries(dir: &Path) -> Result<Vec<PathBuf>, StorageError> {
 }
 
 fn is_session_file(p: &Path) -> bool {
-    p.file_stem().and_then(|s| s.to_str()) != Some(CWD_INDEX_STEM)
+    p.file_stem()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| !NON_SESSION_STEMS.contains(&s))
         && p.extension().is_some_and(|e| e == "json" || e == "jsonl")
 }
 
@@ -877,17 +1104,21 @@ where
     U: DeserializeOwned + Default,
     T: DeserializeOwned,
 {
-    if path.extension().is_some_and(|e| e == "jsonl") {
-        return load_jsonl(path);
-    }
     let data = fs::read(path).map_err(StorageError::from)?;
-    let session: Session<M, U, T> = serde_json::from_slice(&data).map_err(StorageError::from)?;
-    if session.version != SESSION_VERSION {
-        return Err(SessionError::VersionMismatch {
-            found: session.version,
-            expected: SESSION_VERSION,
-        });
-    }
+    let mut session: Session<M, U, T> = if path.extension().is_some_and(|e| e == "jsonl") {
+        load_jsonl(&data, &path.display().to_string())?
+    } else {
+        let session: Session<M, U, T> =
+            serde_json::from_slice(&data).map_err(StorageError::from)?;
+        if session.version != SESSION_VERSION {
+            return Err(SessionError::VersionMismatch {
+                found: session.version,
+                expected: SESSION_VERSION,
+            });
+        }
+        session
+    };
+    session.title = normalize_title(&session.title);
     Ok(session)
 }
 
@@ -950,7 +1181,8 @@ where
 
     pub fn save_to(&mut self, dir: &Path) -> Result<(), SessionError> {
         self.updated_at = now_epoch();
-        let _log = SessionLog::create(dir, self)?;
+        write_session_file(dir, self)?;
+        update_cwd_index(dir, &self.cwd, self.id)?;
         Ok(())
     }
 
@@ -992,17 +1224,22 @@ where
     }
 
     pub fn latest_in(cwd: &str, dir: &Path) -> Result<Option<Self>, SessionError> {
-        if let Some(id) = load_cwd_index(dir).get(cwd).map(|s| s.parse::<MakiId>()) {
-            match id {
-                Ok(id) => match Self::load_from(id, dir) {
-                    Ok(s) => return Ok(Some(s)),
-                    Err(e) => warn!(error = %e, cwd, "indexed session missing on disk; rescanning"),
-                },
-                Err(e) => warn!(error = %e, cwd, "indexed session id unparseable; rescanning"),
+        let cached = load_cwd_index(dir)
+            .remove(cwd)
+            .and_then(|s| match s.parse::<MakiId>() {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    warn!(error = %e, cwd, "indexed session id unparseable; rescanning");
+                    None
+                }
+            });
+        if let Some(id) = cached {
+            match Self::load_from(id, dir) {
+                Ok(s) => return Ok(Some(s)),
+                Err(e) => warn!(error = %e, cwd, "indexed session missing on disk; rescanning"),
             }
         }
 
-        // The indexed entry is stale or corrupt; fall back to scanning disk.
         scan_headers(cwd, dir)?
             .into_iter()
             .max_by_key(|s| s.updated_at)
@@ -1040,6 +1277,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::Effort;
     use super::StoredThinking;
     use super::ThinkingParseError;
     use super::{
@@ -1047,7 +1285,7 @@ mod tests {
         generate_title, json_path, jsonl_path, load_cwd_index, update_cwd_index,
         write_full_session,
     };
-    use super::{Session, SessionError, SessionLog, StorageError, TitleSource};
+    use super::{SCAN_CACHE_FILE, Session, SessionError, SessionLog, StorageError, TitleSource};
     use crate::id::MakiId;
     use serde_json::Value;
     use std::collections::HashMap;
@@ -1060,6 +1298,7 @@ mod tests {
     type TestSession = Session<Value, Value, Value>;
 
     const LEGACY_HEX_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+    const TAMPERED_TITLE: &str = "tampered cached title";
 
     impl TitleSource for Value {
         fn first_user_text(&self) -> Option<&str> {
@@ -1312,6 +1551,30 @@ mod tests {
         assert!(loaded.subagent_messages.is_empty());
     }
 
+    /// A rename with no new messages must survive restart, while a no-op
+    /// append must not grow the file.
+    #[test]
+    fn append_writes_meta_only_when_it_changed() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let mut session: TestSession = Session::new("m", "/project");
+        session.messages.push(user_message("hi"));
+        let mut log = SessionLog::create(dir, &session).unwrap();
+
+        let path = jsonl_path(dir, session.id);
+        let size_before = fs::metadata(&path).unwrap().len();
+        log.append(&session).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().len(), size_before);
+
+        session.title = "renamed".into();
+        session.updated_at = 42;
+        log.append(&session).unwrap();
+
+        let loaded = TestSession::load_from(session.id, dir).unwrap();
+        assert_eq!(loaded.title, "renamed");
+        assert_eq!(loaded.updated_at, 42);
+    }
+
     #[test]
     fn migration_json_to_jsonl() {
         let tmp = TempDir::new().unwrap();
@@ -1385,6 +1648,96 @@ mod tests {
         assert!(list.iter().all(|s| s.id != s2.id));
     }
 
+    /// Rewrites the scan-cache title of `id` without touching the session
+    /// file, so a later list showing [`TAMPERED_TITLE`] proves it was served
+    /// from the cache instead of re-reading the file.
+    fn tamper_cached_title(dir: &Path, id: MakiId) {
+        let cache_path = dir.join(SCAN_CACHE_FILE);
+        let mut cache: Value = serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+        let entry = cache
+            .as_object_mut()
+            .unwrap()
+            .get_mut(&format!("{id}.jsonl"))
+            .expect("session missing from scan cache");
+        entry["header"]["title"] = TAMPERED_TITLE.into();
+        fs::write(&cache_path, serde_json::to_vec(&cache).unwrap()).unwrap();
+    }
+
+    /// One scan must cache headers of every cwd, so reopening the picker
+    /// here or in another project never re-reads unchanged files.
+    #[test]
+    fn list_serves_all_cwds_from_cache_after_one_scan() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let mut a: TestSession = Session::new("m", "/project-a");
+        a.save_to(dir).unwrap();
+        let mut b: TestSession = Session::new("m", "/project-b");
+        b.save_to(dir).unwrap();
+        TestSession::list_in("/project-a", dir).unwrap();
+
+        tamper_cached_title(dir, a.id);
+        tamper_cached_title(dir, b.id);
+        let list_a = TestSession::list_in("/project-a", dir).unwrap();
+        assert_eq!(list_a[0].title, TAMPERED_TITLE);
+        let list_b = TestSession::list_in("/project-b", dir).unwrap();
+        assert_eq!(list_b[0].title, TAMPERED_TITLE);
+    }
+
+    #[test]
+    fn list_rescans_changed_file_and_prunes_deleted() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let mut s1: TestSession = Session::new("m", "/project");
+        s1.messages.push(user_message("hi"));
+        let mut log = SessionLog::create(dir, &s1).unwrap();
+        let s2: TestSession = Session::new("m", "/project");
+        SessionLog::create(dir, &s2).unwrap();
+        TestSession::list_in("/project", dir).unwrap();
+
+        s1.title = "renamed".into();
+        log.append(&s1).unwrap();
+        TestSession::delete_from(s2.id, dir).unwrap();
+
+        let list = TestSession::list_in("/project", dir).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].title, "renamed");
+        let cache: Value =
+            serde_json::from_slice(&fs::read(dir.join(SCAN_CACHE_FILE)).unwrap()).unwrap();
+        assert_eq!(cache.as_object().unwrap().len(), 1, "deleted entry pruned");
+    }
+
+    #[test]
+    fn dirty_persisted_title_normalized_on_list_and_load() {
+        const NORMALIZED: &str = "line one line two";
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let mut s: TestSession = Session::new("m", "/project");
+        s.messages.push(user_message("hi"));
+        let mut log = SessionLog::create(dir, &s).unwrap();
+        s.title = "line one\n\n\tline two".into();
+        log.append(&s).unwrap();
+
+        let list = TestSession::list_in("/project", dir).unwrap();
+        assert_eq!(list[0].title, NORMALIZED);
+        assert_eq!(TestSession::load_from(s.id, dir).unwrap().title, NORMALIZED);
+    }
+
+    #[test_case(Some(b"{ not json".as_slice()) ; "corrupt_cache")]
+    #[test_case(None ; "missing_cache")]
+    fn list_survives_bad_scan_cache(content: Option<&[u8]>) {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let mut s: TestSession = Session::new("m", "/project");
+        s.save_to(dir).unwrap();
+        if let Some(content) = content {
+            fs::write(dir.join(SCAN_CACHE_FILE), content).unwrap();
+        }
+
+        let list = TestSession::list_in("/project", dir).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, s.id);
+    }
+
     fn save_with_time(session: &mut TestSession, dir: &Path, time: u64) {
         session.updated_at = time;
         SessionLog::create(dir, session).unwrap();
@@ -1432,6 +1785,7 @@ mod tests {
         "This is a very long title that exceeds the sixty character…"
         ; "long_truncates_at_word"
     )]
+    #[test_case("one\n\ntwo\t three", "one two three" ; "whitespace_collapses")]
     fn title_extraction(input: &str, expected: &str) {
         let messages: Vec<Value> = if input.is_empty() {
             vec![]
@@ -1736,6 +2090,30 @@ mod tests {
     }
 
     #[test]
+    fn open_repairs_torn_tail_so_next_append_survives_reload() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let mut session: TestSession = Session::new("m", "/project");
+        session.messages.push(user_message("first"));
+        drop(SessionLog::create(dir, &session).unwrap());
+
+        let path = jsonl_path(dir, session.id);
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"{\"t\":\"msg\",\"d\":{\"trun").unwrap();
+        drop(file);
+
+        let (mut loaded, mut log) =
+            SessionLog::open::<Value, Value, Value>(dir, session.id).unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+        loaded.messages.push(user_message("second"));
+        log.append(&loaded).unwrap();
+        drop(log);
+
+        let reloaded = TestSession::load_from(session.id, dir).unwrap();
+        assert_eq!(reloaded.messages.len(), 2);
+    }
+
+    #[test]
     fn load_wrong_version_jsonl_returns_error() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
@@ -1760,6 +2138,7 @@ mod tests {
 
     #[test_case(StoredThinking::Off ; "off")]
     #[test_case(StoredThinking::Adaptive ; "adaptive")]
+    #[test_case(StoredThinking::Effort { level: Effort::XHigh } ; "effort")]
     #[test_case(StoredThinking::Budget { tokens: 4096 } ; "budget")]
     fn stored_thinking_serde_round_trip(variant: StoredThinking) {
         let json = serde_json::to_string(&variant).unwrap();
@@ -1774,8 +2153,65 @@ mod tests {
     #[test_case("1", Ok(StoredThinking::Budget { tokens: 1 }) ; "minimum_budget")]
     #[test_case("0", Err(ThinkingParseError::BudgetZero) ; "budget_zero")]
     #[test_case("fast", Err(ThinkingParseError::Unknown("fast".into())) ; "garbage")]
+    #[test_case("high", Ok(StoredThinking::Effort { level: Effort::High }) ; "effort_level")]
     fn parse_setting(input: &str, expected: Result<StoredThinking, ThinkingParseError>) {
         assert_eq!(StoredThinking::parse_setting(input), expected);
+    }
+
+    // Six ascending values in a six-variant enum also proves ALL is complete.
+    #[test]
+    fn effort_all_ascending_with_increasing_percent() {
+        for pair in Effort::ALL.windows(2) {
+            assert!(pair[0] < pair[1], "ALL must be ascending");
+            assert!(
+                pair[0].percent() < pair[1].percent(),
+                "percent must be strictly increasing"
+            );
+        }
+    }
+
+    #[test]
+    fn effort_wire_strings_round_trip() {
+        let expected = ["minimal", "low", "medium", "high", "xhigh", "max"];
+        for (e, s) in Effort::ALL.into_iter().zip(expected) {
+            assert_eq!(e.as_str(), s);
+            assert_eq!(s.parse::<Effort>(), Ok(e));
+        }
+    }
+
+    #[test_case(Effort::High, &[Effort::Low, Effort::Medium, Effort::High], Effort::High ; "exact_match")]
+    #[test_case(Effort::Max, &[Effort::Low, Effort::Medium, Effort::High], Effort::High ; "downgrade_to_nearest_lower")]
+    #[test_case(Effort::Minimal, &[Effort::Low, Effort::Medium], Effort::Low ; "below_lowest_takes_lowest")]
+    #[test_case(Effort::Medium, &[], Effort::Medium ; "empty_supported_keeps_self")]
+    #[test_case(Effort::Max, &[Effort::High, Effort::XHigh], Effort::XHigh ; "glm_max_snaps_to_xhigh")]
+    fn effort_snap(level: Effort, supported: &[Effort], expected: Effort) {
+        assert_eq!(level.snap(supported), expected);
+    }
+
+    #[test_case(Effort::Minimal, 32_768, 3_276 ; "minimal_ten_percent")]
+    #[test_case(Effort::Medium, 32_768, 13_107 ; "medium_forty_percent")]
+    #[test_case(Effort::Max, 32_768, 32_768 ; "max_full_budget")]
+    #[test_case(Effort::Minimal, 4_096, 1_024 ; "small_max_floors_at_min")]
+    #[test_case(Effort::Max, 512, 1_024 ; "tiny_max_raised_to_floor")]
+    fn effort_budget(level: Effort, max: u32, expected: u32) {
+        assert_eq!(level.budget(max), expected);
+    }
+
+    #[test_case(32_768, 32_768, Effort::Max ; "full_budget_is_max")]
+    #[test_case(64_000, 32_768, Effort::Max ; "above_max_is_max")]
+    #[test_case(0, 32_768, Effort::Minimal ; "zero_is_minimal")]
+    #[test_case(13_107, 32_768, Effort::Medium ; "forty_percent_is_medium")]
+    #[test_case(1_024, 0, Effort::Max ; "zero_max_saturates")]
+    fn effort_from_budget(n: u32, max: u32, expected: Effort) {
+        assert_eq!(Effort::from_budget(n, max), expected);
+    }
+
+    #[test]
+    fn effort_budget_round_trips_at_realistic_max() {
+        const MAX: u32 = 32_768;
+        for e in Effort::ALL {
+            assert_eq!(Effort::from_budget(e.budget(MAX), MAX), e);
+        }
     }
 
     #[test]

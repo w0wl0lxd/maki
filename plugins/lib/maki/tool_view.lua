@@ -20,6 +20,8 @@ local function line_nr_fmt(count)
   return "%" .. w .. "d "
 end
 
+-- opts: max_lines (default 80) shown while collapsed, keep "head"|"tail"
+-- (default "tail"), max_expand_lines (default 2000) kept for expansion.
 function ToolView.new(buf, opts)
   local self = setmetatable({}, ToolView)
   self.buf = buf
@@ -93,6 +95,14 @@ function ToolView:append(line)
   end
 end
 
+function ToolView:append_text(text)
+  for _, line in ipairs(maki.split(text, "\n")) do
+    self:append(line)
+  end
+end
+
+-- Append {content} with line numbers, then syntax-highlight it for {ext}
+-- asynchronously. Returns false when {content} is empty.
 function ToolView:set_highlight(content, ext)
   ext = ext or "md"
   if content:sub(-1) == "\n" then
@@ -101,10 +111,7 @@ function ToolView:set_highlight(content, ext)
   if content == "" then
     return false
   end
-  local lines = {}
-  for line in (content .. "\n"):gmatch("([^\n]*)\n") do
-    lines[#lines + 1] = line
-  end
+  local lines = maki.split(content, "\n")
 
   local fmt = line_nr_fmt(#lines)
   for idx, line in ipairs(lines) do
@@ -186,6 +193,7 @@ function ToolView:update_line(all_idx, line)
   end
 end
 
+-- Call once after the last append so the collapsed notice renders.
 function ToolView:finish()
   if self.keep == "head" and self.skipped > 0 then
     self:flush()
@@ -205,12 +213,10 @@ function ToolView.restore_lines(lines, opts)
   return buf
 end
 
+-- Rebuild a collapsed view from a tool's saved llm_output, click-to-toggle
+-- wired. For `restore` hooks.
 function ToolView.restore(output, opts)
-  local lines = {}
-  for line in (output .. "\n"):gmatch("([^\n]*)\n") do
-    lines[#lines + 1] = line
-  end
-  return ToolView.restore_lines(lines, opts)
+  return ToolView.restore_lines(maki.split(output, "\n"), opts)
 end
 
 return ToolView

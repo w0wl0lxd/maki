@@ -15,19 +15,20 @@ use super::session_state::{SessionState, stored_to_rules};
 use super::{App, Mode, PendingInput, PlanState};
 use crate::agent::QueuedMessage;
 
+/// The single content predicate: `App::save_session` persists a session
+/// iff this holds, and the shutdown path reuses it to tell which tabs were
+/// saved, so the report and the disk can never disagree. Sync the session
+/// first (`save_session` does).
+pub(crate) fn session_has_content(session: &AppSession) -> bool {
+    !session.messages.is_empty()
+        || session.meta.input_draft.is_some()
+        || !session.meta.queued_messages.is_empty()
+        || session.meta.mode != Some(maki_storage::sessions::StoredMode::Build)
+}
+
 impl App {
-    pub(crate) fn has_messages(&self) -> bool {
-        !self.state.session.messages.is_empty()
-    }
-
-    pub(crate) fn has_ephemeral(&self) -> bool {
-        self.state.session.meta.input_draft.is_some()
-            || !self.state.session.meta.queued_messages.is_empty()
-            || self.state.session.meta.mode != Some(maki_storage::sessions::StoredMode::Build)
-    }
-
     pub(crate) fn has_content(&self) -> bool {
-        self.has_messages() || self.has_ephemeral()
+        session_has_content(&self.state.session)
     }
 
     pub(crate) fn save_session(&mut self) {
@@ -167,9 +168,6 @@ impl App {
 
     pub(super) fn reset_session(&mut self) -> Vec<Action> {
         self.reset_ui_chrome();
-        if let Some(ref handle) = self.lua_event_handle {
-            handle.fire_autocmd("SessionReset", serde_json::json!({}));
-        }
         self.state.token_usage = TokenUsage::default();
         self.state.context_size = 0;
         self.state.plan = PlanState::None;
@@ -177,6 +175,7 @@ impl App {
             self.enter_plan();
         }
         self.state.session = AppSession::new(&self.state.session.model, &self.state.session.cwd);
+        self.fire_session_autocmd("SessionReset", serde_json::json!({}));
         vec![Action::NewSession]
     }
 
@@ -215,15 +214,6 @@ impl App {
         ))]
     }
 
-    pub(super) fn open_session_picker(&mut self) -> Vec<Action> {
-        self.session_picker.open(
-            &self.state.session.cwd,
-            self.state.session.id,
-            &self.storage,
-        );
-        vec![]
-    }
-
     pub(crate) fn apply_loaded_session(
         &mut self,
         session: AppSession,
@@ -242,7 +232,7 @@ impl App {
         self.loaded_session_snapshot()
     }
 
-    pub(super) fn load_session(&mut self, session_id: MakiId) -> Vec<Action> {
+    pub(crate) fn load_session(&mut self, session_id: MakiId) -> Vec<Action> {
         let session = match AppSession::load(session_id, &self.storage) {
             Ok(s) => s,
             Err(e) => {
@@ -254,16 +244,5 @@ impl App {
         self.save_session();
         let loaded = self.apply_loaded_session(session, &self.state.model.clone());
         vec![Action::LoadSession(Box::new(loaded))]
-    }
-
-    pub(super) fn delete_session(&mut self, session_id: MakiId) -> Vec<Action> {
-        if let Err(e) = AppSession::delete(session_id, &self.storage) {
-            self.status_bar
-                .flash(format!("Failed to delete session: {e}"));
-            return vec![];
-        }
-        self.session_picker.remove_entry(session_id);
-        self.status_bar.flash("Session deleted".into());
-        vec![]
     }
 }

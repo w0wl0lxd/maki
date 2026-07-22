@@ -387,6 +387,19 @@ pub enum WinCommand {
     Close,
 }
 
+pub enum SessionRequest {
+    List,
+    Live,
+    Current,
+    New { prompt: Option<String>, focus: bool },
+    Prompt { id: Option<String>, text: String },
+    Focus { id: String },
+    Delete { id: String },
+    SetTitle { id: String, title: String },
+}
+
+pub type SessionReply = Result<serde_json::Value, String>;
+
 pub enum UiAction {
     OpenWin {
         buf: Arc<SharedBuf>,
@@ -399,6 +412,10 @@ pub enum UiAction {
     OpenEditor {
         path: PathBuf,
         reply_tx: flume::Sender<i32>,
+    },
+    Session {
+        req: SessionRequest,
+        reply_tx: flume::Sender<SessionReply>,
     },
 }
 

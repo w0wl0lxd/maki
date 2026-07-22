@@ -14,32 +14,27 @@ use maki_agent::{
 };
 use maki_config::{PermissionsConfig, UiConfig};
 use maki_lua::{HintReader, KeymapReader, LuaCommandReader};
-use maki_providers::{ContentBlock, Role, TokenUsage};
-use maki_storage::sessions::StoredThinking;
+use maki_providers::{ContentBlock, Effort, Role, TokenUsage};
+use maki_storage::sessions::{StoredMode, StoredThinking};
 use ratatui::layout::Rect;
 use std::env;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tempfile::TempDir;
 use test_case::test_case;
+
+const WRITER_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn set_zone(app: &mut App, zone: SelectionZone, area: Rect) {
     app.zones.push(SelectableZone { area, zone });
 }
 
-fn test_app() -> App {
-    let writer = Arc::new(StorageWriter::new(StateDir::from_path(env::temp_dir())));
-    let permissions = Arc::new(PermissionManager::new(
-        PermissionsConfig {
-            rules: vec![],
-            ..Default::default()
-        },
-        PathBuf::from("/tmp"),
-    ));
+fn build_app(dir: StateDir, writer: Arc<StorageWriter>) -> App {
     let model = test_model();
-    let mut app = App::new(
+    App::new(
         &model,
         AppSession::new("test-model", "/tmp/test"),
-        StateDir::from_path(env::temp_dir()),
+        dir,
         Arc::new(ArcSwapOption::empty()),
         McpSnapshotReader::empty(),
         McpConfigErrors::new(PathBuf::new()),
@@ -49,12 +44,31 @@ fn test_app() -> App {
         writer,
         UiConfig::default(),
         100,
-        permissions,
+        Arc::new(PermissionManager::new(
+            PermissionsConfig {
+                rules: vec![],
+                ..Default::default()
+            },
+            PathBuf::from("/tmp"),
+        )),
         Arc::from([]),
-    );
+    )
+}
+
+fn test_app() -> App {
+    let dir = StateDir::from_path(env::temp_dir());
+    let mut app = build_app(dir.clone(), Arc::new(StorageWriter::new(dir)));
     let (shared_queue, _rx) = shared_queue::queue();
     app.queue.set_shared(shared_queue);
     app
+}
+
+fn tempdir_app() -> (TempDir, StateDir, Arc<StorageWriter>, App) {
+    let tmp = TempDir::new().unwrap();
+    let dir = StateDir::from_path(tmp.path().to_path_buf());
+    let writer = Arc::new(StorageWriter::new(dir.clone()));
+    let app = build_app(dir.clone(), Arc::clone(&writer));
+    (tmp, dir, writer, app)
 }
 
 fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> Msg {
@@ -183,7 +197,7 @@ fn ctrl_c_quits_when_input_empty() {
     app.status = Status::Idle;
     let actions = app.update(Msg::Key(kb::QUIT.to_key_event()));
     assert_eq!(app.exit_request, ExitRequest::Success);
-    assert!(matches!(&actions[0], Action::Quit));
+    assert!(actions.is_empty());
 }
 
 #[test_case(AgentEvent::Done { usage: TokenUsage::default(), num_turns: 1, stop_reason: None }, ExitRequest::Success ; "done_exits_success")]
@@ -349,6 +363,47 @@ fn clears_queue(terminate: fn(&mut App)) {
     assert!(app.queue.is_empty());
 }
 
+#[test_case("/compact" ; "slash_command")]
+#[test_case("exit" ; "exit_keyword")]
+#[test_case("!ls" ; "shell_prefix")]
+fn submit_prompt_never_interprets_text(text: &str) {
+    let mut app = test_app();
+    match app.submit_prompt(queued_msg(text)) {
+        SubmitOutcome::Started(actions) => {
+            assert!(matches!(&actions[0], Action::SendMessage(_)))
+        }
+        _ => panic!("raw prompt must start the agent"),
+    }
+}
+
+#[test]
+fn submit_prompt_queues_while_streaming() {
+    let mut app = test_app();
+    app.status = Status::Streaming;
+    assert!(matches!(
+        app.submit_prompt(queued_msg("hi")),
+        SubmitOutcome::Queued
+    ));
+    assert_eq!(app.queue.len(), 1);
+}
+
+#[test_case(test_app as fn() -> App, "   ", queue::EMPTY_PROMPT_ERR ; "blank_text")]
+#[test_case(streaming_app_without_queue, "hi", queue::NO_QUEUE_ERR ; "streaming_without_shared_queue")]
+fn submit_prompt_rejects(mk: fn() -> App, text: &str, expected: &str) {
+    let mut app = mk();
+    match app.submit_prompt(queued_msg(text)) {
+        SubmitOutcome::Rejected(e) => assert_eq!(e, expected),
+        _ => panic!("expected rejection"),
+    }
+}
+
+fn streaming_app_without_queue() -> App {
+    let dir = StateDir::from_path(env::temp_dir());
+    let mut app = build_app(dir.clone(), Arc::new(StorageWriter::new(dir)));
+    app.status = Status::Streaming;
+    app
+}
+
 fn queued_msg(text: &str) -> QueuedMessage {
     QueuedMessage {
         text: text.into(),
@@ -476,34 +531,7 @@ fn reset_session_clears_drafting_plan_in_build_mode() {
 
 #[test]
 fn load_session_clears_plan() {
-    let tmp = TempDir::new().unwrap();
-    let dir = StateDir::from_path(tmp.path().to_path_buf());
-    let writer = Arc::new(StorageWriter::new(StateDir::from_path(
-        tmp.path().to_path_buf(),
-    )));
-    let model = test_model();
-    let mut app = App::new(
-        &model,
-        AppSession::new("test-model", "/tmp/test"),
-        dir,
-        Arc::new(ArcSwapOption::empty()),
-        McpSnapshotReader::empty(),
-        McpConfigErrors::new(PathBuf::new()),
-        LuaCommandReader::empty(),
-        KeymapReader::empty(),
-        HintReader::empty(),
-        writer,
-        UiConfig::default(),
-        100,
-        Arc::new(PermissionManager::new(
-            PermissionsConfig {
-                rules: vec![],
-                ..Default::default()
-            },
-            PathBuf::from("/tmp"),
-        )),
-        Arc::from([]),
-    );
+    let (_tmp, _dir, _writer, mut app) = tempdir_app();
     app.state
         .session
         .messages
@@ -1539,7 +1567,95 @@ fn submit_exit_quits() {
         images: vec![],
     });
     assert_eq!(app.exit_request, ExitRequest::Success);
-    assert!(matches!(&actions[0], Action::Quit));
+    assert!(actions.is_empty());
+}
+
+#[test]
+fn session_has_content_covers_each_branch() {
+    let mut session = AppSession::new("test-model", "/tmp/test");
+    assert!(!session_has_content(&session));
+
+    session.meta.input_draft = Some("draft".into());
+    assert!(session_has_content(&session));
+    session.meta.input_draft = None;
+
+    session.meta.queued_messages = vec!["queued".into()];
+    assert!(session_has_content(&session));
+    session.meta.queued_messages.clear();
+
+    session.meta.mode = Some(StoredMode::Plan);
+    assert!(session_has_content(&session));
+    session.meta.mode = Some(StoredMode::Build);
+
+    session.messages.push(Message::user("hello".into()));
+    assert!(session_has_content(&session));
+}
+
+#[test]
+fn save_session_syncs_ephemeral_content_into_meta() {
+    let mut app = test_app();
+    app.save_session();
+    assert!(!session_has_content(&app.state.session));
+
+    app.update(Msg::Key(key(KeyCode::Char('x'))));
+    app.save_session();
+    assert!(session_has_content(&app.state.session));
+
+    app.update(Msg::Key(key(KeyCode::Backspace)));
+    app.save_session();
+    assert!(app.state.session.meta.input_draft.is_none());
+    assert!(!session_has_content(&app.state.session));
+
+    app.update(Msg::Key(key(KeyCode::Tab)));
+    app.save_session();
+    assert_eq!(app.state.session.meta.mode, Some(StoredMode::Plan));
+    assert!(session_has_content(&app.state.session));
+
+    let mut queued = app_with_queued_message();
+    queued.save_session();
+    let session = &queued.state.session;
+    assert!(session.messages.is_empty());
+    assert!(session.meta.input_draft.is_none());
+    assert_eq!(session.meta.mode, Some(StoredMode::Build));
+    assert_eq!(session.meta.queued_messages, vec!["queued".to_string()]);
+    assert!(session_has_content(session));
+}
+
+fn drain_writer(app: App, writer: Arc<StorageWriter>) {
+    drop(app);
+    Arc::try_unwrap(writer)
+        .ok()
+        .expect("app must hold the only other writer reference")
+        .shutdown(WRITER_DRAIN_TIMEOUT);
+}
+
+#[test]
+fn reload_persists_session_with_content_to_disk() {
+    let (_tmp, dir, writer, mut app) = tempdir_app();
+    app.state
+        .session
+        .messages
+        .push(Message::user("hello".into()));
+    let actions = app.execute_command(cmd("/reload"));
+    assert_eq!(app.exit_request, ExitRequest::Reload);
+    assert!(actions.is_empty());
+    let id = app.state.session.id;
+    drain_writer(app, writer);
+
+    assert_eq!(AppSession::load(id, &dir).unwrap().messages.len(), 1);
+}
+
+#[test]
+fn reload_leaves_empty_session_unpersisted_on_disk() {
+    let (tmp, _dir, writer, mut app) = tempdir_app();
+    app.execute_command(cmd("/reload"));
+    drain_writer(app, writer);
+
+    let sessions_dir = tmp.path().join(maki_storage::sessions::SESSIONS_DIR);
+    let entries = std::fs::read_dir(&sessions_dir)
+        .map(|d| d.count())
+        .unwrap_or(0);
+    assert_eq!(entries, 0);
 }
 
 #[test]
@@ -2323,6 +2439,235 @@ fn ctrl_t_noop_when_plan_not_ready() {
 }
 
 #[test]
+fn override_shadows_builtin_ctrl_when_no_overlay_open() {
+    let entry = maki_lua::KeymapEntry {
+        key: kb::HELP.code,
+        modifiers: kb::HELP.modifiers,
+        desc: "plugin help override".into(),
+        plugin: std::sync::Arc::from("test-plugin"),
+        id: 1,
+    };
+    let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
+    let mut app = test_app();
+    let (handle, _probe) = maki_lua::test_support::probed_event_handle();
+    app.lua_event_handle = Some(handle);
+    app.keymap_reader = reader;
+    assert!(!app.help_modal.is_open());
+
+    let actions = app.update(Msg::Key(kb::HELP.to_key_event()));
+
+    assert!(actions.is_empty());
+    assert!(
+        !app.help_modal.is_open(),
+        "override must consume the key before the built-in HELP handler runs"
+    );
+}
+
+#[test]
+fn override_shadows_quit_builtin() {
+    let entry = maki_lua::KeymapEntry {
+        key: kb::QUIT.code,
+        modifiers: kb::QUIT.modifiers,
+        desc: "plugin quit override".into(),
+        plugin: std::sync::Arc::from("test-plugin"),
+        id: 3,
+    };
+    let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
+    let mut app = test_app();
+    let (handle, _probe) = maki_lua::test_support::probed_event_handle();
+    app.lua_event_handle = Some(handle);
+    app.status = Status::Idle;
+    app.keymap_reader = reader;
+
+    let actions = app.update(Msg::Key(kb::QUIT.to_key_event()));
+
+    assert!(actions.is_empty());
+    assert_eq!(
+        app.exit_request,
+        ExitRequest::None,
+        "override must consume Ctrl+C before the built-in quit handler runs"
+    );
+}
+
+#[test]
+fn override_shadows_tab_mode_toggle() {
+    let entry = maki_lua::KeymapEntry {
+        key: KeyCode::Tab,
+        modifiers: KeyModifiers::NONE,
+        desc: "plugin tab override".into(),
+        plugin: std::sync::Arc::from("test-plugin"),
+        id: 4,
+    };
+    let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
+    let mut app = test_app();
+    let (handle, _probe) = maki_lua::test_support::probed_event_handle();
+    app.lua_event_handle = Some(handle);
+    let initial_mode = app.state.mode;
+    app.keymap_reader = reader;
+
+    let actions = app.update(Msg::Key(key(KeyCode::Tab)));
+
+    assert!(actions.is_empty());
+    assert_eq!(
+        app.state.mode, initial_mode,
+        "override must consume Tab before the built-in mode toggle runs"
+    );
+}
+
+#[test]
+fn override_shadows_esc_builtin() {
+    let entry = maki_lua::KeymapEntry {
+        key: KeyCode::Esc,
+        modifiers: KeyModifiers::NONE,
+        desc: "plugin esc override".into(),
+        plugin: std::sync::Arc::from("test-plugin"),
+        id: 5,
+    };
+    let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
+    let mut app = test_app();
+    let (handle, _probe) = maki_lua::test_support::probed_event_handle();
+    app.lua_event_handle = Some(handle);
+    app.keymap_reader = reader;
+
+    let actions = app.update(Msg::Key(key(KeyCode::Esc)));
+
+    assert!(actions.is_empty());
+    assert!(
+        app.last_esc.is_none(),
+        "override must consume Esc before the built-in esc handler runs"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn override_does_not_shadow_suspend() {
+    let entry = maki_lua::KeymapEntry {
+        key: kb::SUSPEND.code,
+        modifiers: kb::SUSPEND.modifiers,
+        desc: "plugin suspend override".into(),
+        plugin: std::sync::Arc::from("test-plugin"),
+        id: 6,
+    };
+    let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
+    let mut app = test_app();
+    app.keymap_reader = reader;
+
+    let actions = app.update(Msg::Key(kb::SUSPEND.to_key_event()));
+
+    assert!(
+        actions.iter().any(|a| matches!(a, Action::Suspend)),
+        "suspend is non-remappable: override must not shadow Ctrl+Z"
+    );
+}
+
+#[test]
+fn builtin_runs_when_no_override() {
+    let mut app = test_app();
+    assert!(!app.help_modal.is_open());
+
+    app.update(Msg::Key(kb::HELP.to_key_event()));
+
+    assert!(app.help_modal.is_open());
+}
+
+#[test]
+fn overlay_wins_over_override_when_plan_form_open() {
+    let entry = maki_lua::KeymapEntry {
+        key: kb::PLAN_TOGGLE.code,
+        modifiers: kb::PLAN_TOGGLE.modifiers,
+        desc: "plugin plan override".into(),
+        plugin: std::sync::Arc::from("test-plugin"),
+        id: 2,
+    };
+    let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
+    let mut app = plan_app();
+    app.keymap_reader = reader;
+    assert!(app.plan_form.is_visible());
+    assert!(app.lua_event_handle.is_none());
+
+    app.update(Msg::Key(kb::PLAN_TOGGLE.to_key_event()));
+
+    assert!(!app.plan_form.is_visible());
+}
+
+#[test]
+fn streaming_cancel_wins_over_quit_override() {
+    let entry = maki_lua::KeymapEntry {
+        key: kb::QUIT.code,
+        modifiers: kb::QUIT.modifiers,
+        desc: "plugin quit override".into(),
+        plugin: std::sync::Arc::from("test-plugin"),
+        id: 7,
+    };
+    let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
+    let mut app = test_app();
+    let (handle, _probe) = maki_lua::test_support::probed_event_handle();
+    app.lua_event_handle = Some(handle);
+    app.status = Status::Streaming;
+    app.run_id = 1;
+    app.keymap_reader = reader;
+
+    let actions = app.update(Msg::Key(kb::QUIT.to_key_event()));
+
+    assert!(
+        matches!(&actions[0], Action::CancelAgent { .. }),
+        "built-in cancel must win while streaming even when Ctrl+C is overridden"
+    );
+    assert_eq!(app.status, Status::Idle);
+    assert_eq!(app.exit_request, ExitRequest::None);
+}
+
+#[test]
+fn dead_host_override_falls_back_to_builtin() {
+    let entry = maki_lua::KeymapEntry {
+        key: kb::HELP.code,
+        modifiers: kb::HELP.modifiers,
+        desc: "plugin help override".into(),
+        plugin: std::sync::Arc::from("test-plugin"),
+        id: 8,
+    };
+    let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
+    let mut app = test_app();
+    app.lua_event_handle = Some(maki_lua::EventHandle::disconnected_for_test());
+    app.keymap_reader = reader;
+    assert!(!app.help_modal.is_open());
+
+    app.update(Msg::Key(kb::HELP.to_key_event()));
+
+    assert!(
+        app.help_modal.is_open(),
+        "dead lua host must fall back to the built-in HELP handler"
+    );
+}
+
+#[test]
+fn streaming_cancel_wins_over_esc_override() {
+    let entry = maki_lua::KeymapEntry {
+        key: KeyCode::Esc,
+        modifiers: KeyModifiers::NONE,
+        desc: "plugin esc override".into(),
+        plugin: std::sync::Arc::from("test-plugin"),
+        id: 9,
+    };
+    let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
+    let mut app = test_app();
+    let (handle, _probe) = maki_lua::test_support::probed_event_handle();
+    app.lua_event_handle = Some(handle);
+    app.status = Status::Streaming;
+    app.run_id = 1;
+    app.last_esc = Some(Instant::now());
+    app.keymap_reader = reader;
+
+    let actions = app.update(Msg::Key(key(KeyCode::Esc)));
+
+    assert!(
+        matches!(&actions[0], Action::CancelAgent { .. }),
+        "built-in cancel must win while streaming even when Esc is overridden"
+    );
+    assert_eq!(app.status, Status::Idle);
+}
+
+#[test]
 fn reset_session_closes_plan_form() {
     let mut app = plan_app();
     assert!(app.plan_form.is_visible());
@@ -2382,6 +2727,12 @@ fn thinking_explicit_args() {
         args: "8192".into(),
     });
     assert_eq!(app.state.thinking, ThinkingConfig::Budget(8192));
+
+    app.execute_command(ParsedCommand {
+        name: "/thinking".into(),
+        args: "high".into(),
+    });
+    assert_eq!(app.state.thinking, ThinkingConfig::Effort(Effort::High));
 }
 
 #[test]

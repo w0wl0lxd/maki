@@ -12,13 +12,9 @@ local STRUCTURED_OUTPUT_NAME = "structured_output"
 local STRUCTURED_OUTPUT_DESCRIPTION = "Report your final result. Call it exactly once when your task is complete."
 local STRUCTURED_OUTPUT_ACK = "Output recorded."
 local STRUCTURED_OUTPUT_PROMPT_SUFFIX = "\n\nWhen finished, call the structured_output tool with your final result."
-local DONE_NAME = "done"
-local DONE_DESCRIPTION = "Call when the task is complete with your final answer."
-local DONE_PROMPT_SUFFIX = "\n\nWhen finished, call the done tool with your final answer."
 local MAX_STRUCTURED_RETRIES = 2
 local MAX_SCHEMA_ERRORS = 3
 local SCHEMA_COMPILE_ERROR = "invalid output_schema"
-local SCHEMA_ROOT_ERROR = "output_schema must have type object"
 local STRUCTURED_MISSING_ERROR = "subagent finished without calling structured_output"
 local STRUCTURED_INVALID_ERROR = "subagent result does not match output_schema"
 local NUDGE_MISSING =
@@ -29,8 +25,18 @@ local BODY_INDENT_COLS = 4
 local MIN_MD_WIDTH = 20
 local DEFAULT_OUTPUT_LINES = 5
 
-local description =
-  [[Launch an autonomous subagent. Types: research (read-only, default) or general (full access). Best combined with batch. Each invocation starts fresh - inline context. Summarize results in your response.]]
+local description = [[Launch an autonomous subagent to perform tasks independently. Best combined with batch.
+
+Subagent types (set via `subagent_type`):
+- `research` (default): Read-only tools. For codebase exploration or gathering context.
+- `general`: Full tool access. For delegating implementation work.
+
+Notes:
+1. Launch multiple tasks concurrently when possible.
+2. The agent's result is not visible to the user. Summarize it in your response.
+3. Each invocation starts fresh - inline any needed context into the prompt.
+4. Tell it to return concise summaries with file:line refs, not full file contents.
+]]
 
 local schema = {
   type = "object",
@@ -51,11 +57,19 @@ local schema = {
     },
     model_tier = {
       type = "string",
-      description = 'Model tier (optional, omit to use current model, capped at current tier): "strong" (deep reasoning, ~5x cost), "medium" (balanced), "weak" (fast/cheap).',
+      description = 'Model tier (optional, omit to use current model, capped at current tier):\n- "strong" (e.g. Opus): Deep reasoning, complex architecture, subtle bugs, most critical sections. ~5x cost of medium.\n- "medium" (e.g. Sonnet): Balanced. Refactors, features, multi-file changes.\n- "weak" (e.g. Haiku): Fast/cheap. Search, summarize, boilerplate, simple edits.',
     },
     output_schema = {
       description = "JSON Schema (object) the subagent's final result must match. When set, the result is returned as a validated JSON string.",
     },
+  },
+}
+
+local examples = {
+  {
+    description = "Find auth middleware",
+    prompt = "Search the codebase for authentication middleware. Return file paths and a summary of how auth is implemented.",
+    model_tier = "weak",
   },
 }
 
@@ -118,9 +132,6 @@ local function handler(input, ctx)
   -- Compile early: a bad schema costs zero tokens.
   local validator
   if input.output_schema then
-    if type(input.output_schema) ~= "table" or input.output_schema.type ~= "object" then
-      return { llm_output = SCHEMA_ROOT_ERROR, is_error = true }
-    end
     local compile_err
     validator, compile_err = maki.json.schema_validator(input.output_schema)
     if compile_err then
@@ -171,58 +182,9 @@ local function handler(input, ctx)
         end,
       },
     }
-  else
-    local_tools = {
-      [DONE_NAME] = {
-        description = DONE_DESCRIPTION,
-        input_schema = {
-          type = "object",
-          properties = {
-            answer = { type = "string", description = "Final answer to return to the parent agent." },
-          },
-          required = { "answer" },
-        },
-        handler = function(value)
-          captured = value.answer
-          return "Done."
-        end,
-      },
-    }
   end
 
   local preview = make_preview(ctx, input.description or "task")
-
-  local permit = semaphore:acquire()
-
-  -- pcall so a raised error cannot leak the permit.
-  local ok, out = pcall(function()
-    local sess, sess_err = maki.agent.session(ctx, {
-      model_spec = model.spec,
-      system = system,
-      tools = tool_defs,
-      local_tools = local_tools,
-      audience = audience,
-      name = input.description,
-    })
-    if sess_err then
-      return { llm_output = sess_err, is_error = true }
-    end
-
-    local message = input.prompt
-    if validator then
-      message = message .. STRUCTURED_OUTPUT_PROMPT_SUFFIX
-    else
-      message = message .. DONE_PROMPT_SUFFIX
-    end
-
-    local result, err = sess:prompt(message)
-    local retries = 0
-    while not err and validator and not captured and retries < MAX_STRUCTURED_RETRIES do
-      retries = retries + 1
-      result, err = sess:prompt(NUDGE_MISSING)
-    end
-
-    sess:close()
 
   local function on_finish(err, result)
     if err then
@@ -235,22 +197,6 @@ local function handler(input, ctx)
         format = result.format,
       })
     end
-    if validator and not captured then
-      local msg = last_errors and (STRUCTURED_INVALID_ERROR .. ":\n" .. last_errors) or STRUCTURED_MISSING_ERROR
-      return { llm_output = msg, is_error = true }
-    end
-    if captured then
-      if type(captured) == "string" then
-        return { llm_output = captured, format = "markdown" }
-      end
-      return { llm_output = maki.json.encode(captured), format = "markdown" }
-    end
-    return { llm_output = result.text, format = "markdown" }
-  end)
-
-  permit:release()
-  if not ok then
-    error(out, 0)
   end
 
   maki.async.run(function()
@@ -348,6 +294,7 @@ maki.api.register_tool({
   description = description,
   kind = "execute",
   audiences = { "main", "workflow" },
+  examples = examples,
   schema = schema,
   handler = handler,
   header = header,

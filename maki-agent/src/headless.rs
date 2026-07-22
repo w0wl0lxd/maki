@@ -23,7 +23,8 @@ use crate::template;
 use crate::tools::{DescriptionContext, FileReadTracker, ToolAudience, ToolFilter, ToolRegistry};
 use crate::{
     Agent, AgentConfig, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, Envelope,
-    EventSender, ImageSource, McpHandle, PermissionsConfig, ToolOutput, ToolOutputLines,
+    EventSender, ImageSource, McpHandle, McpSession, PermissionsConfig, ToolOutput,
+    ToolOutputLines,
 };
 
 type StoredSession = Session<Message, TokenUsage, ToolOutput>;
@@ -114,7 +115,6 @@ struct ToolDefinitionsParams<'a> {
     model: &'a Model,
     config: &'a AgentConfig,
     excluded_tools: &'a [&'static str],
-    mcp_handle: Option<&'a McpHandle>,
     workflow: bool,
     registry: &'a ToolRegistry,
     additional_active: &'a [Arc<str>],
@@ -124,7 +124,6 @@ fn setup(
     model: &Model,
     config: &AgentConfig,
     excluded_tools: &[&'static str],
-    mcp_handle: Option<&McpHandle>,
     workflow: bool,
 ) -> AgentSetup {
     let vars = template::env_vars();
@@ -134,7 +133,6 @@ fn setup(
         model,
         config,
         excluded_tools,
-        mcp_handle,
         workflow,
         registry: ToolRegistry::global(),
         additional_active: &[],
@@ -155,8 +153,7 @@ fn tool_definitions(params: &ToolDefinitionsParams) -> Value {
         audience: ToolAudience::MAIN,
         workflow: params.workflow,
     };
-
-    let tools = if params.config.dynamic_tools.enabled {
+    if params.config.dynamic_tools.enabled {
         let mode = &params.config.dynamic_tools.default_mode;
         let allowed = params
             .registry
@@ -171,14 +168,17 @@ fn tool_definitions(params: &ToolDefinitionsParams) -> Value {
         params
             .registry
             .definitions(params.vars, &ctx, params.model.supports_tool_examples())
-    };
-
-    let mut tools = tools;
-    if let Some(handle) = params.mcp_handle {
-        handle.extend_tools(&mut tools);
     }
+}
 
-    tools
+/// Names advertised to SDK clients: base tools plus what the first request
+/// would carry from MCP (always-load definitions and `tool_search`).
+fn advertised_tool_names(tools: &Value, mcp: Option<&McpSession>) -> Vec<String> {
+    let mut probe = tools.clone();
+    if let Some(mcp) = mcp {
+        mcp.extend_tools(&mut probe);
+    }
+    extract_tool_names(&probe)
 }
 
 pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
@@ -192,7 +192,6 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
         &params.model,
         &params.config,
         &params.excluded_tools,
-        params.mcp_handle.as_ref(),
         params.workflow,
     );
 
@@ -204,7 +203,8 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
         &params.model,
     );
 
-    let tool_names = extract_tool_names(&tools);
+    let mcp = params.mcp_handle.clone().map(|h| McpSession::new(h, &[]));
+    let tool_names = advertised_tool_names(&tools, mcp.as_ref());
 
     let (raw_tx, event_rx) = flume::unbounded::<Envelope>();
 
@@ -258,7 +258,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
                 },
             )
             .with_loaded_instructions(instructions.loaded)
-            .with_mcp(params.mcp_handle)
+            .with_mcp(mcp)
             .with_excluded_tools(&params.excluded_tools);
 
             let result = agent
@@ -335,11 +335,14 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
         &params.model,
         &params.config,
         &params.excluded_tools,
-        params.mcp_handle.as_ref(),
         params.workflow,
     );
 
-    let tool_names = extract_tool_names(&tools);
+    let mcp = params
+        .mcp_handle
+        .clone()
+        .map(|h| McpSession::new(h, &params.initial_history));
+    let tool_names = advertised_tool_names(&tools, mcp.as_ref());
 
     let (raw_tx, event_rx) = flume::unbounded::<Envelope>();
     let (input_tx, input_rx) = flume::unbounded::<AgentInput>();
@@ -402,8 +405,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                                 vars: &vars,
                                 model: &new_model,
                                 config: &params.config,
-                                excluded_tools: &params.excluded_tools,
-                                mcp_handle: params.mcp_handle.as_ref(),
+                                excluded_tools: params.excluded_tools.as_slice(),
                                 workflow: params.workflow,
                                 registry: ToolRegistry::global(),
                                 additional_active: &[],
@@ -473,7 +475,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                 .with_loaded_instructions(instructions.loaded.clone())
                 .with_user_response_rx(Arc::clone(&answer_rx))
                 .with_cancel(cancel)
-                .with_mcp(params.mcp_handle.clone())
+                .with_mcp(mcp.clone())
                 .with_excluded_tools(&params.excluded_tools);
 
                 let result = agent.run(input).await;
@@ -599,5 +601,23 @@ mod tests {
     fn extract_tool_names_filters_valid_entries() {
         let tools = serde_json::json!([{"name": "read"}, {"type": "function"}, {"name": "bash"}]);
         assert_eq!(extract_tool_names(&tools), vec!["read", "bash"]);
+    }
+
+    #[test]
+    fn advertised_names_show_tool_search_not_deferred_tools() {
+        let base = serde_json::json!([{"name": "read"}]);
+        let mcp = crate::mcp::stub_session(&[("srv.fetch_issue", "Fetch a GitHub issue")]);
+        let names = advertised_tool_names(&base, Some(&mcp));
+        assert_eq!(
+            names,
+            vec!["read", crate::mcp::TOOL_SEARCH_TOOL_NAME],
+            "clients must see the search tool, not deferred definitions"
+        );
+        assert_eq!(
+            base,
+            serde_json::json!([{"name": "read"}]),
+            "probing must not bake MCP entries into the base tools"
+        );
+        assert_eq!(advertised_tool_names(&base, None), vec!["read"]);
     }
 }

@@ -118,11 +118,7 @@ function ToolView.new(buf, opts)
 end
 
 function ToolView:set_header(lines)
-  local capped = {}
-  for i = 1, #lines do
-    capped[i] = truncate_line(lines[i], self.max_line_bytes)
-  end
-  self.header = capped
+  self.header = lines
   self:flush()
 end
 
@@ -138,7 +134,6 @@ function ToolView:clear()
 end
 
 function ToolView:append(line)
-  line = truncate_line(line, self.max_line_bytes)
   local all_idx
   if #self.all_lines < self.max_expand_lines then
     self.all_lines[#self.all_lines + 1] = line
@@ -230,12 +225,12 @@ function ToolView:flush()
   local lines = {}
 
   for _, h in ipairs(self.header) do
-    lines[#lines + 1] = h
+    lines[#lines + 1] = truncate_line(h, self.max_line_bytes)
   end
 
   if self.expanded then
     for _, line in ipairs(self.all_lines) do
-      lines[#lines + 1] = line
+      lines[#lines + 1] = truncate_line(line, self.max_line_bytes)
     end
     if self.all_skipped > 0 then
       lines[#lines + 1] = { { self.all_skipped .. " lines omitted", "dim" } }
@@ -247,18 +242,18 @@ function ToolView:flush()
       or nil
 
     if self.keep == "tail" and notice then
-      lines[#lines + 1] = notice
+      lines[#lines + 1] = truncate_line(notice, self.max_line_bytes)
     end
 
     for i = 0, self.ring_count - 1 do
       -- Modulo only after the ring wrapped: `x % math.huge` is NaN in Luau,
       -- and uncapped views (max_lines = math.huge) never wrap.
       local idx = self.ring_start == 1 and (i + 1) or (((self.ring_start - 1 + i) % self.max) + 1)
-      lines[#lines + 1] = self.ring[idx]
+      lines[#lines + 1] = truncate_line(self.ring[idx], self.max_line_bytes)
     end
 
     if self.keep == "head" and notice then
-      lines[#lines + 1] = notice
+      lines[#lines + 1] = truncate_line(notice, self.max_line_bytes)
     end
   end
 
@@ -266,7 +261,6 @@ function ToolView:flush()
 end
 
 function ToolView:update_line(all_idx, line)
-  line = truncate_line(line, self.max_line_bytes)
   self.all_lines[all_idx] = line
   for ri = 1, self.ring_count do
     if self.ring_map[ri] == all_idx then

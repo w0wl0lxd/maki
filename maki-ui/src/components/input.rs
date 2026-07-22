@@ -80,6 +80,8 @@ pub struct InputBox {
     placeholder_hint: &'static str,
     pending_images: Vec<ImageSource>,
     max_input_lines: u16,
+    last_total_vl: u16,
+    last_content_height: u16,
 }
 
 impl InputBox {
@@ -179,6 +181,8 @@ impl InputBox {
             placeholder_hint: random_placeholder_hint(),
             pending_images: Vec::new(),
             max_input_lines: DEFAULT_MAX_INPUT_LINES as u16,
+            last_total_vl: 1,
+            last_content_height: 1,
         }
     }
 
@@ -433,6 +437,8 @@ impl InputBox {
         }
         let max_scroll = total_vl.saturating_sub(content_height);
         self.scroll_y = self.scroll_y.min(max_scroll);
+        self.last_total_vl = total_vl;
+        self.last_content_height = content_height.max(1);
 
         let is_empty = self.buffer.value().is_empty();
         let mut styled_lines: Vec<Line> = if is_empty && self.pending_images.is_empty() {
@@ -530,7 +536,10 @@ impl InputBox {
     }
 
     pub fn scroll(&mut self, delta: i32) {
-        self.scroll_y = apply_scroll_delta(self.scroll_y, delta);
+        let max_scroll = self
+            .last_total_vl
+            .saturating_sub(self.last_content_height.max(1));
+        self.scroll_y = apply_scroll_delta(self.scroll_y, delta).min(max_scroll);
         self.follow_cursor = false;
     }
 }

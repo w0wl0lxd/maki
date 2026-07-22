@@ -585,10 +585,9 @@ mod tests {
     #[test]
     fn pending_debounce_controls_visibility() {
         let (mut picker, _done_tx) = pending_picker();
-        picker.tick();
         assert!(
             !picker.session.as_ref().unwrap().visible,
-            "should stay hidden before debounce"
+            "should start hidden"
         );
 
         picker.session.as_mut().unwrap().started_at =

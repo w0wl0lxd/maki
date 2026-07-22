@@ -40,7 +40,6 @@ use crate::components::plan_form::{PlanForm, PlanFormAction};
 use crate::components::rewind_picker::{RewindPicker, RewindPickerAction};
 use crate::components::scrollbar;
 use crate::components::search_modal::{SearchAction, SearchModal};
-use crate::components::session_picker::{SessionPicker, SessionPickerAction};
 use crate::components::status_bar::StatusBar;
 use crate::components::theme_picker::{ThemePicker, ThemePickerAction};
 use crate::components::tool_display::format_turn_usage;
@@ -71,7 +70,8 @@ pub(crate) use crate::agent::QueuedMessage;
 pub(crate) use mode::{Mode, PlanState, PlanTrigger};
 #[cfg(test)]
 use mouse::EDGE_SCROLL_LINES;
-pub(crate) use queue::MessageQueue;
+pub(crate) use queue::{MessageQueue, SubmitOutcome};
+pub(crate) use session::session_has_content;
 use session_state::SessionState;
 
 const CANCEL_MSG: &str = "Cancelled.";
@@ -140,7 +140,6 @@ pub struct App {
     pub(super) model_picker: ModelPicker,
     pub(super) login_picker: LoginPicker,
     pub(super) mcp_picker: McpPicker,
-    pub(super) session_picker: SessionPicker,
     pub(super) rewind_picker: RewindPicker,
     pub(super) help_modal: HelpModal,
     pub(super) usage_modal: UsageModal,
@@ -220,7 +219,6 @@ impl App {
             model_picker: ModelPicker::new(available_models),
             login_picker: LoginPicker::new(),
             mcp_picker: McpPicker::new(mcp_reader, mcp_config_errors),
-            session_picker: SessionPicker::new(),
             rewind_picker: RewindPicker::new(),
             help_modal: HelpModal::new(),
             usage_modal: UsageModal::new(),
@@ -291,6 +289,18 @@ impl App {
 
     pub(crate) fn flash(&mut self, msg: String) {
         self.status_bar.flash(msg);
+    }
+
+    pub(crate) fn fire_session_autocmd(&self, event: &str, mut data: serde_json::Value) {
+        if let Some(ref handle) = self.lua_event_handle {
+            if let Some(map) = data.as_object_mut() {
+                map.insert(
+                    "session_id".into(),
+                    serde_json::Value::String(self.state.session.id.to_string()),
+                );
+            }
+            handle.fire_autocmd(event, data);
+        }
     }
 
     pub fn tick_error_expiry(&mut self) {
@@ -394,7 +404,6 @@ impl App {
                 }
             };
         }
-        try_picker!(self.session_picker);
         try_picker!(self.rewind_picker);
         try_picker!(self.task_picker);
         try_picker!(self.model_picker);
@@ -604,22 +613,6 @@ impl App {
             });
         }
 
-        if self.session_picker.is_open() {
-            return Some(match self.session_picker.handle_key(key) {
-                SessionPickerAction::Consumed => vec![],
-                SessionPickerAction::Select(id) => self.load_session(id),
-                SessionPickerAction::ConfirmDelete => {
-                    self.status_bar.flash(format!(
-                        "Press {} again to confirm delete",
-                        key::DELETE.label
-                    ));
-                    vec![]
-                }
-                SessionPickerAction::Delete(id) => self.delete_session(id),
-                SessionPickerAction::Close => vec![],
-            });
-        }
-
         if self.rewind_picker.is_open() {
             return Some(match self.rewind_picker.handle_key(key) {
                 RewindPickerAction::Consumed => vec![],
@@ -684,19 +677,21 @@ impl App {
         self.clear_selection_unless_pending_copy();
 
         if key::SUSPEND.matches(key) && cfg!(unix) {
-            return self.suspend();
+            return vec![Action::Suspend];
         }
 
         if let Some(actions) = self.dispatch_overlay(key) {
             return actions;
         }
 
-        if let Some(actions) = self.handle_ctrl(key) {
-            return actions;
+        if !(self.status == Status::Streaming && is_streaming_stop_key(key))
+            && self.dispatch_override(key)
+        {
+            return vec![];
         }
 
-        if self.dispatch_plugin_keymap(key) {
-            return vec![];
+        if let Some(actions) = self.handle_ctrl(key) {
+            return actions;
         }
 
         if !self.is_main_chat() {
@@ -720,13 +715,14 @@ impl App {
         self.handle_main_chat_key(key)
     }
 
-    fn dispatch_plugin_keymap(&self, key: KeyEvent) -> bool {
+    fn dispatch_override(&self, key: KeyEvent) -> bool {
         let snap = self.keymap_reader.load();
         for entry in &snap.entries {
-            if entry.key == key.code && entry.modifiers == key.modifiers {
-                if let Some(ref handle) = self.lua_event_handle {
-                    handle.run_keybind_callback(entry.id);
-                }
+            if entry.key == key.code
+                && entry.modifiers == key.modifiers
+                && let Some(ref handle) = self.lua_event_handle
+                && handle.run_keybind_callback(entry.id)
+            {
                 return true;
             }
         }
@@ -827,15 +823,15 @@ impl App {
         }
     }
 
-    fn suspend(&mut self) -> Vec<Action> {
-        vec![Action::Suspend]
+    fn quit(&mut self) -> Vec<Action> {
+        self.quit_with(ExitRequest::Success)
     }
 
-    fn quit(&mut self) -> Vec<Action> {
+    fn quit_with(&mut self, req: ExitRequest) -> Vec<Action> {
         self.save_session();
         self.save_input_history();
-        self.exit_request = ExitRequest::Success;
-        vec![Action::Quit]
+        self.exit_request = req;
+        vec![]
     }
 
     pub(crate) fn handle_submit(&mut self, sub: Submission) -> Vec<Action> {
@@ -868,14 +864,7 @@ impl App {
                 visible: prefix.visible,
             }];
         }
-        let msg: QueuedMessage = sub.into();
-        if self.status == Status::Streaming {
-            self.queue_and_notify(msg);
-            vec![]
-        } else {
-            self.run_id += 1;
-            self.start_from_queue(&msg)
-        }
+        self.submit_or_queue(sub.into())
     }
 
     fn handle_cancel(&mut self) -> Vec<Action> {
@@ -1087,9 +1076,7 @@ impl App {
                     self.chat_index.clear();
                     self.subagent_answers.clear();
                     self.status = Status::Idle;
-                    if let Some(ref handle) = self.lua_event_handle {
-                        handle.fire_autocmd("TurnEnd", serde_json::json!({}));
-                    }
+                    self.fire_session_autocmd("TurnEnd", serde_json::json!({}));
                     if self.exit_on_done {
                         self.exit_request = ExitRequest::Success;
                     }
@@ -1104,9 +1091,10 @@ impl App {
                     for chat in &mut self.chats {
                         chat.fail_in_progress_with_message(message.clone());
                     }
-                    if let Some(ref handle) = self.lua_event_handle {
-                        handle.fire_autocmd("TurnError", serde_json::json!({ "message": message }));
-                    }
+                    self.fire_session_autocmd(
+                        "TurnError",
+                        serde_json::json!({ "message": message }),
+                    );
                     if self.exit_on_done {
                         self.exit_request = ExitRequest::Error;
                     }
@@ -1185,7 +1173,6 @@ impl App {
                 self.queue.set_focus();
                 vec![]
             }
-            "/sessions" => self.open_session_picker(),
             "/model" => {
                 self.model_picker.open(&self.state.model.spec());
                 vec![Action::RefreshModels]
@@ -1256,6 +1243,7 @@ impl App {
                 vec![]
             }
             "/exit" => self.quit(),
+            "/reload" => self.quit_with(ExitRequest::Reload),
             name if name.starts_with("/project:") || name.starts_with("/user:") => {
                 self.execute_custom_command(name, &cmd.args)
             }
@@ -1350,18 +1338,10 @@ impl App {
             self.flash(format!("Unknown command: {name}"));
             return vec![];
         };
-        let rendered = cmd.render(args);
-        let msg = QueuedMessage {
-            text: rendered,
+        self.submit_or_queue(QueuedMessage {
+            text: cmd.render(args),
             images: Vec::new(),
-        };
-        if self.status == Status::Streaming {
-            self.queue_and_notify(msg);
-            vec![]
-        } else {
-            self.run_id += 1;
-            self.start_from_queue(&msg)
-        }
+        })
     }
 
     fn cmd_cd(&mut self, args: &str) -> Vec<Action> {
@@ -1393,7 +1373,7 @@ impl App {
         vec![]
     }
 
-    fn overlays(&self) -> [&dyn Overlay; 14] {
+    fn overlays(&self) -> [&dyn Overlay; 13] {
         [
             &self.help_modal,
             &self.usage_modal,
@@ -1402,7 +1382,6 @@ impl App {
             &self.search_modal,
             &self.file_picker,
             &self.task_picker,
-            &self.session_picker,
             &self.rewind_picker,
             &self.theme_picker,
             &self.model_picker,
@@ -1412,7 +1391,7 @@ impl App {
         ]
     }
 
-    fn overlays_mut(&mut self) -> [&mut dyn Overlay; 14] {
+    fn overlays_mut(&mut self) -> [&mut dyn Overlay; 13] {
         [
             &mut self.help_modal,
             &mut self.usage_modal,
@@ -1421,7 +1400,6 @@ impl App {
             &mut self.search_modal,
             &mut self.file_picker,
             &mut self.task_picker,
-            &mut self.session_picker,
             &mut self.rewind_picker,
             &mut self.theme_picker,
             &mut self.model_picker,
@@ -1435,6 +1413,12 @@ impl App {
         self.overlays().iter().any(|o| o.is_open())
     }
 
+    /// True when the agent is parked on user input: a permission prompt or an
+    /// auth retry. Drives the `needs_input` session status.
+    pub(crate) fn awaiting_input(&self) -> bool {
+        self.permission_prompt.is_open() || self.pending_input != PendingInput::None
+    }
+
     pub fn has_modal_overlay(&self) -> bool {
         self.overlays().iter().any(|o| o.is_open() && o.is_modal())
     }
@@ -1446,7 +1430,6 @@ impl App {
     pub fn is_animating(&self) -> bool {
         !self.image_paste_rx.is_empty()
             || self.btw_modal.is_animating()
-            || self.session_picker.is_loading()
             || self.file_picker.is_loading()
             || self.float_mgr.is_open()
             || self
@@ -1497,7 +1480,6 @@ impl App {
         }
         try_picker!(self.file_picker);
         try_picker!(self.task_picker);
-        try_picker!(self.session_picker);
         try_picker!(self.rewind_picker);
         try_picker!(self.theme_picker);
         try_picker!(self.model_picker);
@@ -1569,6 +1551,10 @@ impl App {
         actions.extend(self.start_from_queue(&msg));
         actions
     }
+}
+
+fn is_streaming_stop_key(key: KeyEvent) -> bool {
+    key::QUIT.matches(key) || key.code == KeyCode::Esc
 }
 
 fn sync_search_highlight(modal: &SearchModal, chat: &mut Chat) {

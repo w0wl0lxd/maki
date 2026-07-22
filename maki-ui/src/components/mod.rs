@@ -20,7 +20,6 @@ pub mod queue_panel;
 pub(crate) mod rewind_picker;
 pub(crate) mod scrollbar;
 pub(crate) mod search_modal;
-pub(crate) mod session_picker;
 pub(crate) mod split_layout;
 pub mod status_bar;
 pub(crate) mod streaming_content;
@@ -209,7 +208,6 @@ pub enum Action {
     EditInputInEditor,
     Btw(String),
     Suspend,
-    Quit,
 }
 
 const ERROR_DISPLAY: Duration = Duration::from_secs(5);
@@ -220,12 +218,13 @@ pub enum ExitRequest {
     None,
     Success,
     Error,
+    Reload,
 }
 
 impl ExitRequest {
     pub fn code(&self) -> i32 {
         match self {
-            Self::None | Self::Success => 0,
+            Self::None | Self::Success | Self::Reload => 0,
             Self::Error => 1,
         }
     }
@@ -388,15 +387,14 @@ pub(crate) fn test_pricing() -> ModelPricing {
 pub(crate) fn test_model() -> maki_providers::Model {
     maki_providers::Model {
         id: "test-model".into(),
-        provider: maki_providers::provider::ProviderKind::Anthropic,
-        dynamic_slug: None,
+        provider: std::sync::Arc::<str>::from("anthropic"),
         tier: maki_providers::ModelTier::Medium,
         family: maki_providers::ModelFamily::Claude,
         supports_tool_examples_override: None,
         supports_thinking_override: None,
         supports_vision_override: Some(true),
         pricing: test_pricing(),
-        max_output_tokens: 8192,
+        max_output_tokens: Some(8192),
         context_window: TEST_CONTEXT_WINDOW,
     }
 }

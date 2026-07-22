@@ -11,14 +11,14 @@ use maki_storage::StateDir;
 
 use crate::setup;
 
-pub fn run(model_arg: Option<String>, yolo: bool) -> Result<()> {
+pub fn run(model_arg: Option<String>, yolo: bool, no_jit: bool) -> Result<()> {
     let storage = StateDir::resolve().context("resolve data directory")?;
     maki_providers::model_registry::load_from_storage(&storage);
 
     let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
     load_env_files(&cwd);
 
-    let mut plugin_host = PluginHost::new(Arc::clone(ToolRegistry::global_arc()))
+    let mut plugin_host = PluginHost::with_jit(Arc::clone(ToolRegistry::global_arc()), !no_jit)
         .context("initialize lua plugin host")?;
 
     let raw_config = plugin_host
@@ -48,7 +48,7 @@ pub fn run(model_arg: Option<String>, yolo: bool) -> Result<()> {
 
     let model = setup::resolve_model(model_arg.as_deref(), &config.provider, &storage)?;
 
-    setup::init_logging(&storage, &config.storage);
+    setup::init_logging(&config.storage);
     setup::install_panic_log_hook();
 
     let (mcp_handle, _mcp_config_errors) = smol::block_on(maki_agent::mcp::start(&cwd));

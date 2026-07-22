@@ -5,12 +5,10 @@ pub(crate) mod shared_queue;
 
 use std::collections::HashMap;
 use std::mem;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use maki_agent::mcp;
 use maki_agent::permissions::PermissionManager;
 use maki_agent::{
     AgentConfig, CancelMap, CancelToken, Envelope, McpCommand, McpConfigErrors, McpHandle,
@@ -57,8 +55,8 @@ pub(crate) struct AgentHandles {
 }
 
 impl AgentHandles {
-    /// MCP is started once up front. The handle lives across agent respawns, only the agent
-    /// loop task gets replaced.
+    /// MCP is shared across sessions and agent respawns; the event loop starts it
+    /// once and shuts it down at exit. Only the agent loop task lives here.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn(
         model_slot: &Arc<ArcSwap<ModelSlot>>,
@@ -66,12 +64,12 @@ impl AgentHandles {
         config: AgentConfig,
         tool_output_lines: ToolOutputLines,
         permissions: &Arc<PermissionManager>,
-        cwd: PathBuf,
         session_id: Option<SessionRef>,
         timeouts: maki_providers::Timeouts,
         lua_handle: Option<EventHandle>,
+        mcp_handle: Option<McpHandle>,
+        mcp_config_errors: McpConfigErrors,
     ) -> Self {
-        let (mcp_handle, mcp_config_errors) = smol::block_on(mcp::start(&cwd));
         spawn_agent_internal(
             model_slot,
             initial_history,
@@ -152,33 +150,39 @@ impl AgentHandles {
         old.cancel();
     }
 
-    pub(crate) fn shutdown(self, timeout: Duration) {
-        let _ = self.cmd_tx.try_send(AgentCommand::CancelAll);
-        let mcp_handle = self.mcp_handle;
-        let task = self.task;
-        drop((self.cmd_tx, self.agent_rx, self.answer_tx, self.queue));
-        info!("waiting for agent to finish (timeout {timeout:?})");
-        smol::block_on(async {
-            let finished = futures_lite::future::or(
-                async {
-                    task.await;
-                    true
-                },
-                async {
-                    smol::Timer::after(timeout).await;
-                    false
-                },
-            )
-            .await;
-            if !finished {
-                warn!("agent did not finish within {timeout:?}, forcing shutdown");
-            }
-
-            if let Some(ref handle) = mcp_handle {
-                handle.shutdown().await;
-            }
-        });
+    /// Hand back the agent task, dropping every channel so the loop can
+    /// wind down. The caller sends `CancelAll` first and then awaits all
+    /// tabs at once via [`join_all`] instead of paying a serial timeout
+    /// per tab.
+    pub(crate) fn into_task(self) -> smol::Task<()> {
+        self.task
     }
+}
+
+/// Wait for every agent task under one shared timeout, not one per task.
+pub(crate) fn join_all(tasks: Vec<smol::Task<()>>, timeout: Duration) {
+    info!(
+        count = tasks.len(),
+        "waiting for agents to finish (timeout {timeout:?})"
+    );
+    smol::block_on(async {
+        let finished = futures_lite::future::or(
+            async {
+                for task in tasks {
+                    task.await;
+                }
+                true
+            },
+            async {
+                smol::Timer::after(timeout).await;
+                false
+            },
+        )
+        .await;
+        if !finished {
+            warn!("agents did not finish within {timeout:?}, forcing shutdown");
+        }
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -250,5 +254,37 @@ fn spawn_agent_internal(
         queue: queue_tx,
         timeouts,
         task,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use super::*;
+
+    const LONG_TIMEOUT: Duration = Duration::from_secs(60);
+    const SHORT_TIMEOUT: Duration = Duration::from_millis(50);
+
+    #[test]
+    fn join_all_returns_when_all_tasks_complete() {
+        join_all(Vec::new(), LONG_TIMEOUT);
+        join_all(
+            (0..3).map(|_| smol::spawn(async {})).collect(),
+            LONG_TIMEOUT,
+        );
+    }
+
+    #[test]
+    fn join_all_stuck_task_returns_after_shared_timeout() {
+        let start = Instant::now();
+        join_all(
+            vec![
+                smol::spawn(async {}),
+                smol::spawn(futures_lite::future::pending::<()>()),
+            ],
+            SHORT_TIMEOUT,
+        );
+        assert!(start.elapsed() >= SHORT_TIMEOUT);
     }
 }

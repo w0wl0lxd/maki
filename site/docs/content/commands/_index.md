@@ -19,7 +19,6 @@ Type `/` in the input box to open the command palette.
 | `/help` | Show keybindings |
 | `/usage` | Show token usage breakdown |
 | `/queue` | Remove items from queue |
-| `/sessions` | Browse and switch sessions |
 | `/model` | Switch model |
 | `/theme` | Switch color theme |
 | `/mcp` | Configure MCP servers |
@@ -27,11 +26,18 @@ Type `/` in the input box to open the command palette.
 | `/cd` | Change working directory |
 | `/btw` | Ask a quick question (no tools, no history pollution) |
 | `/yolo` | Toggle YOLO mode (skip all permission prompts) |
-| `/thinking` | Toggle extended thinking (off, adaptive, or budget) |
+| `/thinking` | Toggle extended thinking (off, adaptive, effort level, or budget) |
 | `/fast` | Toggle Anthropic fast mode (Opus only) |
 | `/workflow` | Toggle workflow mode (task callable inside code_execution) |
 | `/exit` | Exit the application |
+| `/reload` | Reload plugins and config |
 | `/memory` | View, edit, and delete memory files |
+| `/rename` | Rename the current session |
+| `/sessions` | Browse and switch sessions |
+
+## Sessions
+
+Sessions run concurrently. `/new` starts a fresh session while the old one keeps working in the background, and `/sessions` shows the live status of each (working, needs input, idle) so you can jump between them. When a background session finishes or needs input, Maki flashes a note in the status bar.
 
 ## Custom commands
 

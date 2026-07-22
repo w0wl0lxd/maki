@@ -27,6 +27,7 @@ use maki_providers::model::ModelTier;
 use maki_providers::provider;
 use maki_providers::{ContentBlock, Model, ModelError, Role, ThinkingConfig};
 use maki_storage::id::MakiId;
+use maki_storage::sessions::StoredThinking;
 use mlua::{Function, IntoLuaMulti, Lua, Result as LuaResult, Table, Value as LuaValue};
 use serde_json::Value as JsonValue;
 use tracing::info;
@@ -47,25 +48,15 @@ fn resolve_model_from_ctx(ctx: &AgentContext, tier: Option<&str>) -> Result<Mode
     if effective == ctx.model.tier {
         return Ok(Model::clone(&ctx.model));
     }
+    let slug = &ctx.model.provider;
     let map = maki_providers::model_registry::model_registry()
         .read()
         .unwrap();
-    ctx.model
-        .dynamic_slug
-        .is_none()
-        .then(|| map.spec_for_tier(ctx.model.provider, effective))
-        .flatten()
+    map.spec_for_tier(slug, effective)
         .or_else(|| map.spec_for_tier_any(effective))
         .and_then(|s| Model::from_spec(&s).ok())
         .map(Ok)
-        .unwrap_or_else(|| {
-            Model::from_tier_dynamic(
-                ctx.model.provider,
-                effective,
-                ctx.model.dynamic_slug.as_deref(),
-            )
-            .map_err(|e| e.to_string())
-        })
+        .unwrap_or_else(|| Model::from_tier_dynamic(slug, effective).map_err(|e| e.to_string()))
 }
 
 fn model_to_lua_table(lua: &Lua, model: &Model) -> LuaResult<Table> {
@@ -351,8 +342,10 @@ async fn call_tool(
 ///     `(string)` or `(nil, err)`.
 ///   `name` (string?) - display name for logs and UI.
 ///   `audience` (string?) - tool audience for capability gating. Default: `"general_sub"`.
-///   `thinking` (string|integer?) - thinking mode: `"off"`, `"adaptive"`, or a
-///     budget integer (token count). Inherits parent setting if omitted.
+///   `thinking` (string|integer?) - thinking mode: `"off"`, `"adaptive"`, an
+///     effort level (`"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`,
+///     `"max"`), or a budget integer (token count). Inherits parent setting
+///     if omitted.
 ///   `fast` (boolean?) - use fast mode. Inherits parent setting if omitted.
 /// @return (Session?, string?) Session handle, or `(nil, err)` on failure.
 /// @example
@@ -446,13 +439,20 @@ async fn session(
     }
 
     let thinking = match thinking_val {
-        Some(LuaValue::String(s)) => match s.to_str()?.as_ref() {
-            "off" => ThinkingConfig::Off,
-            "adaptive" => ThinkingConfig::Adaptive,
-            other => return Ok(err_pair(format!("invalid thinking: {other}"))),
+        Some(LuaValue::String(s)) => match StoredThinking::parse_setting(&s.to_str()?) {
+            Ok(stored) => ThinkingConfig::from(stored),
+            Err(e) => return Ok(err_pair(format!("invalid thinking: {e}"))),
         },
-        Some(LuaValue::Integer(n)) => ThinkingConfig::Budget(n as u32),
-        Some(LuaValue::Number(n)) => ThinkingConfig::Budget(n as u32),
+        Some(LuaValue::Integer(n)) => match u32::try_from(n) {
+            Ok(tokens) if tokens > 0 => ThinkingConfig::Budget(tokens),
+            _ => return Ok(err_pair(format!("invalid thinking budget: {n}"))),
+        },
+        Some(LuaValue::Number(n)) if n >= 1.0 && n <= f64::from(u32::MAX) => {
+            ThinkingConfig::Budget(n as u32)
+        }
+        Some(LuaValue::Number(n)) => {
+            return Ok(err_pair(format!("invalid thinking budget: {n}")));
+        }
         Some(_) => return Err(mlua::Error::runtime("thinking must be string or number")),
         None => agent_ctx.opts.thinking,
     };

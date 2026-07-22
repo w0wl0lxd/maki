@@ -240,7 +240,7 @@ impl InputBox {
         }
     }
 
-    pub fn mention_query(&self) -> Option<&str> {
+    pub fn mention_query(&self) -> Option<(&str, &str)> {
         let line = &self.buffer.lines()[self.buffer.y()];
         let cursor_x = self.buffer.x();
 
@@ -254,8 +254,20 @@ impl InputBox {
         let at_pos = before_cursor.rfind('@')?;
         let after_at = &before_cursor[at_pos + 1..];
 
-        if at_pos == 0 || before_cursor[..at_pos].chars().last().is_none_or(|c| c.is_whitespace()) {
-            Some(after_at)
+        if at_pos == 0
+            || before_cursor[..at_pos]
+                .chars()
+                .last()
+                .is_none_or(|c| c.is_whitespace())
+        {
+            let last_slash = after_at.rfind('/');
+            if let Some(slash_pos) = last_slash {
+                let cwd = &after_at[..=slash_pos];
+                let query = &after_at[slash_pos + 1..];
+                Some((cwd, query))
+            } else {
+                Some(("", after_at))
+            }
         } else {
             None
         }
@@ -274,7 +286,11 @@ impl InputBox {
         let before_cursor = &line[..byte_idx];
 
         if let Some(at_pos) = before_cursor.rfind('@') {
-            let is_valid = at_pos == 0 || before_cursor[..at_pos].chars().last().is_none_or(|c| c.is_whitespace());
+            let is_valid = at_pos == 0
+                || before_cursor[..at_pos]
+                    .chars()
+                    .last()
+                    .is_none_or(|c| c.is_whitespace());
             if is_valid {
                 let before_at = &line[..at_pos];
                 let after_cursor = &line[byte_idx..];
@@ -729,14 +745,28 @@ mod tests {
     fn mention_query_at_start() {
         let mut input = InputBox::new(InputHistory::default());
         type_text(&mut input, "@src");
-        assert_eq!(input.mention_query(), Some("src"));
+        assert_eq!(input.mention_query(), Some(("", "src")));
     }
 
     #[test]
     fn mention_query_after_whitespace() {
         let mut input = InputBox::new(InputHistory::default());
         type_text(&mut input, "read @src");
-        assert_eq!(input.mention_query(), Some("src"));
+        assert_eq!(input.mention_query(), Some(("", "src")));
+    }
+
+    #[test]
+    fn mention_query_with_directory() {
+        let mut input = InputBox::new(InputHistory::default());
+        type_text(&mut input, "@src/comp/ma");
+        assert_eq!(input.mention_query(), Some(("src/comp/", "ma")));
+    }
+
+    #[test]
+    fn mention_query_directory_only() {
+        let mut input = InputBox::new(InputHistory::default());
+        type_text(&mut input, "@src/");
+        assert_eq!(input.mention_query(), Some(("src/", "")));
     }
 
     #[test]
@@ -1209,5 +1239,4 @@ mod tests {
         assert!(!matches!(action, InputAction::OpenMention));
         assert_eq!(input.buffer.value(), "see(@");
     }
-
 }

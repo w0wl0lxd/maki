@@ -567,23 +567,43 @@ impl App {
         }
 
         if self.mention_flyout.is_open() {
-            match key.code {
-                KeyCode::Up | KeyCode::Down | KeyCode::Enter | KeyCode::Esc => {
-                    return Some(match self.mention_flyout.handle_key(key) {
-                        MentionAction::Consumed => vec![],
-                        MentionAction::Select(path) => {
-                            self.mention_flyout.close();
-                            self.input_box.replace_mention(&path);
-                            self.command_palette.sync(&self.input_box.buffer.value());
-                            vec![]
+            let is_navigation_key = matches!(
+                key.code,
+                KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::Enter
+                    | KeyCode::Esc
+                    | KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Backspace
+            );
+            if is_navigation_key || is_ctrl(&key) {
+                let actions: Option<Vec<Action>> = match self.mention_flyout.handle_key(key) {
+                    MentionAction::Consumed => Some(vec![]),
+                    MentionAction::Select(path) => {
+                        self.mention_flyout.close();
+                        self.input_box.replace_mention(&path);
+                        self.command_palette.sync(&self.input_box.buffer.value());
+                        Some(vec![])
+                    }
+                    MentionAction::Navigate(new_cwd) => {
+                        let mention_text = format!("@{}", new_cwd);
+                        self.input_box.replace_mention(&mention_text);
+                        self.command_palette.sync(&self.input_box.buffer.value());
+                        if let Some((cwd, query)) = self.input_box.mention_query() {
+                            self.mention_flyout.set_query(cwd, query);
                         }
-                        MentionAction::Close => {
-                            self.mention_flyout.close();
-                            vec![]
-                        }
-                    });
+                        Some(vec![])
+                    }
+                    MentionAction::Close => {
+                        self.mention_flyout.close();
+                        Some(vec![])
+                    }
+                    MentionAction::Passthrough => None,
+                };
+                if let Some(actions) = actions {
+                    return Some(actions);
                 }
-                _ => {}
             }
         }
 
@@ -812,16 +832,17 @@ impl App {
         match self.input_box.handle_key(key) {
             InputAction::Submit(sub) => self.handle_submit(sub),
             InputAction::OpenMention => {
-                if let Some(query) = self.input_box.mention_query() {
-                    self.mention_flyout.open(&self.state.session.cwd, query);
+                if let Some((cwd, query)) = self.input_box.mention_query() {
+                    self.mention_flyout
+                        .open(&self.state.session.cwd, cwd, query);
                 }
                 vec![]
             }
             InputAction::PaletteSync(val) => {
                 self.command_palette.sync(&val);
                 if self.mention_flyout.is_open() {
-                    if let Some(query) = self.input_box.mention_query() {
-                        self.mention_flyout.set_query(query);
+                    if let Some((cwd, query)) = self.input_box.mention_query() {
+                        self.mention_flyout.set_query(cwd, query);
                     } else {
                         self.mention_flyout.close();
                     }

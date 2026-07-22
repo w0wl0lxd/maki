@@ -18,6 +18,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use tracing::warn;
 use unicode_width::UnicodeWidthChar;
 
+use crate::components::scrollbar::render_vertical_scrollbar;
 use crate::theme;
 
 const MAX_HEIGHT: u16 = 10;
@@ -27,11 +28,14 @@ const EMPTY_DIR_MSG: &str = "Current directory is empty";
 const WALKER_CRASHED_MSG: &str = "File scanner crashed";
 const PENDING_DEBOUNCE_MS: u128 = 100;
 const MAX_MATERIALIZED: u32 = 640;
+const FOOTER_HINTS: &str = "↑↓ select · ← parent · → enter · esc close";
 
 pub enum MentionAction {
     Consumed,
     Select(String),
+    Navigate(String),
     Close,
+    Passthrough,
 }
 
 struct Match {
@@ -45,6 +49,7 @@ struct Session {
     matches: Vec<Match>,
     total_matches: u32,
 
+    cwd: String,
     query: String,
     selected: usize,
     scroll_offset: usize,
@@ -74,7 +79,7 @@ impl MentionFlyout {
         Self { session: None }
     }
 
-    pub fn open(&mut self, cwd: &str, query: &str) {
+    pub fn open(&mut self, root_cwd: &str, cwd: &str, query: &str) {
         self.close();
 
         let notify = Arc::new(|| {});
@@ -84,7 +89,7 @@ impl MentionFlyout {
         let cancel_clone = cancel.clone();
         let (done_tx, done_rx) = flume::bounded(1);
 
-        let root = PathBuf::from(cwd);
+        let root = PathBuf::from(root_cwd);
         if let Err(e) = thread::Builder::new()
             .name("file-walker".into())
             .spawn(move || {
@@ -137,6 +142,7 @@ impl MentionFlyout {
             matcher: Matcher::new(Config::DEFAULT.match_paths()),
             matches: Vec::new(),
             total_matches: 0,
+            cwd: cwd.to_string(),
             query: query.to_string(),
             selected: 0,
             scroll_offset: 0,
@@ -162,8 +168,9 @@ impl MentionFlyout {
         self.session.is_some()
     }
 
-    pub fn set_query(&mut self, query: &str) {
+    pub fn set_query(&mut self, cwd: &str, query: &str) {
         if let Some(s) = &mut self.session {
+            s.cwd = cwd.to_string();
             s.query = query.to_string();
             self.reparse_pattern();
         }
@@ -171,9 +178,13 @@ impl MentionFlyout {
 
     fn reparse_pattern(&mut self) {
         let Some(s) = &mut self.session else { return };
-        s.nucleo
-            .pattern
-            .reparse(0, &s.query, CaseMatching::Smart, Normalization::Smart, false);
+        s.nucleo.pattern.reparse(
+            0,
+            &s.query,
+            CaseMatching::Smart,
+            Normalization::Smart,
+            false,
+        );
         s.selected = 0;
         s.scroll_offset = 0;
     }
@@ -189,7 +200,13 @@ impl MentionFlyout {
                 if !s.visible {
                     MentionAction::Consumed
                 } else if let Some(m) = s.matches.get(s.selected) {
-                    MentionAction::Select(m.path.clone())
+                    if m.path.ends_with('/') {
+                        let new_cwd = format!("{}{}", s.cwd, m.path);
+                        MentionAction::Navigate(new_cwd)
+                    } else {
+                        let full_path = format!("{}{}", s.cwd, m.path);
+                        MentionAction::Select(full_path)
+                    }
                 } else {
                     MentionAction::Close
                 }
@@ -202,7 +219,48 @@ impl MentionFlyout {
                 Self::move_selection_impl(s, 1);
                 MentionAction::Consumed
             }
-            _ => MentionAction::Close,
+            KeyCode::Right => {
+                if s.visible
+                    && let Some(m) = s.matches.get(s.selected)
+                    && m.path.ends_with('/')
+                {
+                    let new_cwd = format!("{}{}", s.cwd, m.path);
+                    return MentionAction::Navigate(new_cwd);
+                }
+                MentionAction::Consumed
+            }
+            KeyCode::Left | KeyCode::Backspace => {
+                if s.cwd.is_empty() {
+                    MentionAction::Passthrough
+                } else {
+                    let new_cwd = Self::parent_cwd(&s.cwd);
+                    MentionAction::Navigate(new_cwd)
+                }
+            }
+            _ if super::is_ctrl(&key) => {
+                if key.code == KeyCode::Char('n') {
+                    Self::move_selection_impl(s, 1);
+                    MentionAction::Consumed
+                } else if key.code == KeyCode::Char('p') {
+                    Self::move_selection_impl(s, -1);
+                    MentionAction::Consumed
+                } else {
+                    MentionAction::Passthrough
+                }
+            }
+            _ => MentionAction::Passthrough,
+        }
+    }
+
+    pub fn parent_cwd(cwd: &str) -> String {
+        if cwd.is_empty() {
+            return String::new();
+        }
+        let trimmed = cwd.trim_end_matches('/');
+        if let Some(last_slash) = trimmed.rfind('/') {
+            format!("{}/", &trimmed[..last_slash])
+        } else {
+            String::new()
         }
     }
 
@@ -260,7 +318,9 @@ impl MentionFlyout {
             }
         }
 
-        if status.changed && let Some(s) = self.session.as_mut() {
+        if status.changed
+            && let Some(s) = self.session.as_mut()
+        {
             Self::refresh_matches_impl(s);
             Self::clamp_selection_impl(s);
         }
@@ -281,19 +341,32 @@ impl MentionFlyout {
 
         for item in snapshot.matched_items(0..count) {
             let col = &item.matcher_columns[0];
-            let path = col.to_string();
+            let full_path = col.to_string();
+
+            if !full_path.starts_with(&s.cwd) {
+                continue;
+            }
+
+            let display_path = full_path[s.cwd.len()..].to_string();
 
             let indices = if has_pattern {
                 indices_buf.clear();
                 pattern
                     .column_pattern(0)
                     .indices(col.slice(..), &mut s.matcher, &mut indices_buf);
-                mem::take(&mut indices_buf)
+                let offset = s.cwd.chars().count() as u32;
+                indices_buf
+                    .iter()
+                    .map(|&i| i.saturating_sub(offset))
+                    .collect()
             } else {
                 Vec::new()
             };
 
-            s.matches.push(Match { path, indices });
+            s.matches.push(Match {
+                path: display_path,
+                indices,
+            });
         }
     }
 
@@ -320,7 +393,7 @@ impl MentionFlyout {
         } else {
             match_count.min(MAX_HEIGHT)
         };
-        content_rows + 1
+        content_rows + 2
     }
 
     pub fn view(&mut self, frame: &mut Frame, area: Rect) -> Rect {
@@ -334,10 +407,18 @@ impl MentionFlyout {
             .border_style(theme::current().tool_dim);
         frame.render_widget(block, area);
 
-        let inner = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(1));
+        let inner = Rect::new(
+            area.x,
+            area.y + 1,
+            area.width,
+            area.height.saturating_sub(2),
+        );
         s.viewport_height = inner.height as usize;
         Self::ensure_visible_impl(s);
         Self::render_list_impl(frame, inner, s);
+
+        let footer_area = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
+        Self::render_footer_impl(frame, footer_area, s);
 
         area
     }
@@ -368,7 +449,13 @@ impl MentionFlyout {
             .enumerate()
             .map(|(i, m)| {
                 let selected = s.scroll_offset + i == s.selected;
-                Self::build_highlighted_line_impl(&m.path, &m.indices, max_label_width, selected, &t)
+                Self::build_highlighted_line_impl(
+                    &m.path,
+                    &m.indices,
+                    max_label_width,
+                    selected,
+                    &t,
+                )
             })
             .collect();
 
@@ -381,6 +468,20 @@ impl MentionFlyout {
         }
 
         frame.render_widget(Paragraph::new(lines), area);
+
+        if s.matches.len() as u16 > s.viewport_height as u16 {
+            render_vertical_scrollbar(frame, area, s.matches.len() as u16, s.scroll_offset as u16);
+        }
+    }
+
+    fn render_footer_impl(frame: &mut Frame, area: Rect, s: &Session) {
+        let t = theme::current();
+        let match_count = s.total_matches;
+        let footer_text = format!("{}   {} matches", FOOTER_HINTS, match_count);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(footer_text, t.item_desc))),
+            area,
+        );
     }
 
     fn build_highlighted_line_impl<'a>(
@@ -449,14 +550,14 @@ mod tests {
     #[test]
     fn open_initializes_session() {
         let mut flyout = MentionFlyout::new();
-        flyout.open("/tmp", "");
+        flyout.open("/tmp", "", "");
         assert!(flyout.is_open());
     }
 
     #[test]
     fn close_clears_session() {
         let mut flyout = MentionFlyout::new();
-        flyout.open("/tmp", "");
+        flyout.open("/tmp", "", "");
         flyout.close();
         assert!(!flyout.is_open());
     }
@@ -464,15 +565,15 @@ mod tests {
     #[test]
     fn set_query_updates_pattern() {
         let mut flyout = MentionFlyout::new();
-        flyout.open("/tmp", "");
-        flyout.set_query("test");
+        flyout.open("/tmp", "", "");
+        flyout.set_query("", "test");
         assert_eq!(flyout.session.as_ref().unwrap().query, "test");
     }
 
     #[test]
     fn esc_returns_close() {
         let mut flyout = MentionFlyout::new();
-        flyout.open("/tmp", "");
+        flyout.open("/tmp", "", "");
         assert!(matches!(
             flyout.handle_key(key(KeyCode::Esc)),
             MentionAction::Close
@@ -482,10 +583,76 @@ mod tests {
     #[test]
     fn enter_during_pending_is_consumed() {
         let mut flyout = MentionFlyout::new();
-        flyout.open("/tmp", "");
+        flyout.open("/tmp", "", "");
         assert!(matches!(
             flyout.handle_key(key(KeyCode::Enter)),
             MentionAction::Consumed
         ));
+    }
+
+    #[test]
+    fn parent_cwd_empty_returns_empty() {
+        assert_eq!(MentionFlyout::parent_cwd(""), "");
+    }
+
+    #[test]
+    fn parent_cwd_single_segment_returns_empty() {
+        assert_eq!(MentionFlyout::parent_cwd("src/"), "");
+    }
+
+    #[test]
+    fn parent_cwd_nested_returns_parent() {
+        assert_eq!(MentionFlyout::parent_cwd("src/comp/"), "src/");
+    }
+
+    #[test]
+    fn parent_cwd_deep_nested_returns_parent() {
+        assert_eq!(MentionFlyout::parent_cwd("src/comp/mod/"), "src/comp/");
+    }
+
+    #[test]
+    fn left_when_cwd_empty_passthrough() {
+        let mut flyout = MentionFlyout::new();
+        flyout.open("/tmp", "", "");
+        assert!(matches!(
+            flyout.handle_key(key(KeyCode::Left)),
+            MentionAction::Passthrough
+        ));
+    }
+
+    #[test]
+    fn left_when_cwd_nonempty_navigates_parent() {
+        let mut flyout = MentionFlyout::new();
+        flyout.open("/tmp", "src/", "");
+        assert!(matches!(
+            flyout.handle_key(key(KeyCode::Left)),
+            MentionAction::Navigate(_)
+        ));
+    }
+
+    #[test]
+    fn ctrl_n_moves_down() {
+        let mut flyout = MentionFlyout::new();
+        flyout.open("/tmp", "", "");
+        let ctrl_n = KeyEvent {
+            code: KeyCode::Char('n'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        assert!(matches!(flyout.handle_key(ctrl_n), MentionAction::Consumed));
+    }
+
+    #[test]
+    fn ctrl_p_moves_up() {
+        let mut flyout = MentionFlyout::new();
+        flyout.open("/tmp", "", "");
+        let ctrl_p = KeyEvent {
+            code: KeyCode::Char('p'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        assert!(matches!(flyout.handle_key(ctrl_p), MentionAction::Consumed));
     }
 }

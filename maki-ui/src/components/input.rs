@@ -4,7 +4,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::shell::parse_shell_prefix;
 use crate::highlight;
-use crate::text_buffer::{EditResult, TextBuffer, is_newline_key};
+use crate::text_buffer::{is_newline_key, EditResult, TextBuffer};
 use crate::theme;
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -12,17 +12,17 @@ use maki_storage::input_history::InputHistory;
 use std::mem;
 
 use maki_providers::ImageSource;
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+use ratatui::Frame;
 
 use super::scrollbar::render_vertical_scrollbar;
 use super::{apply_scroll_delta, visual_line_count};
 use crate::selection::LineBreaks;
+use maki_config::DEFAULT_MAX_INPUT_LINES;
 
-const MAX_INPUT_LINES: u16 = 20;
 const CHEVRON: &str = super::CHEVRON;
 const NEWLINE_PAD: &str = "  ";
 const PREFIX_WIDTH: u16 = 2;
@@ -167,7 +167,7 @@ impl InputBox {
             follow_cursor: true,
             placeholder_hint: random_placeholder_hint(),
             pending_images: Vec::new(),
-            max_input_lines: MAX_INPUT_LINES,
+            max_input_lines: DEFAULT_MAX_INPUT_LINES as u16,
         }
     }
 
@@ -676,7 +676,7 @@ mod tests {
             input.buffer.add_line();
         }
         assert!(input.height(TEST_WIDTH) > base);
-        assert!(input.height(TEST_WIDTH) <= MAX_INPUT_LINES + 2);
+        assert!(input.height(TEST_WIDTH) <= DEFAULT_MAX_INPUT_LINES as u16 + 2);
     }
 
     #[test]
@@ -829,7 +829,7 @@ mod tests {
         for _ in 0..extra_lines {
             input.buffer.add_line();
         }
-        let terminal = render_input(&mut input, 40, MAX_INPUT_LINES + 2);
+        let terminal = render_input(&mut input, 40, DEFAULT_MAX_INPUT_LINES as u16 + 2);
         assert_eq!(has_scrollbar_thumb(&terminal), expect_visible);
     }
 

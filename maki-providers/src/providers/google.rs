@@ -261,11 +261,9 @@ impl Google {
 
         let response_text = response.text().await?;
         let cached: serde_json::Value = serde_json::from_str(&response_text)?;
-        let name = cached["name"]
-            .as_str()
-            .ok_or_else(|| AgentError::Config {
-                message: "missing cached content name in response".into(),
-            })?;
+        let name = cached["name"].as_str().ok_or_else(|| AgentError::Config {
+            message: "missing cached content name in response".into(),
+        })?;
         Ok(name.to_string())
     }
 
@@ -373,12 +371,9 @@ impl Provider for Google {
             }
 
             let (cached_content_name, old_name_to_delete) = {
-                let mut cache_state = self
-                    .cache_state
-                    .lock()
-                    .map_err(|e| AgentError::Config {
-                        message: format!("cache state lock failed: {e}"),
-                    })?;
+                let mut cache_state = self.cache_state.lock().map_err(|e| AgentError::Config {
+                    message: format!("cache state lock failed: {e}"),
+                })?;
                 if let Some(state) = cache_state.get(sid) {
                     if state.is_valid(current_tools_hash, current_message_count) {
                         (Some(state.name.clone()), None)
@@ -404,11 +399,10 @@ impl Provider for Google {
                     .await
                 {
                     Ok(name) => {
-                        let mut cache_state = self.cache_state.lock().map_err(|e| {
-                            AgentError::Config {
+                        let mut cache_state =
+                            self.cache_state.lock().map_err(|e| AgentError::Config {
                                 message: format!("cache state lock failed: {e}"),
-                            }
-                        })?;
+                            })?;
                         cache_state.insert(
                             sid.clone(),
                             CachedContentState::new(
@@ -503,17 +497,12 @@ impl Provider for Google {
 
     fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
         Box::pin(async {
-            let pool = KeyPool::resolve("google", ENV_VAR).map_err(|e| {
-                AgentError::Config {
-                    message: format!("key pool resolve failed: {e}"),
-                }
+            let pool = KeyPool::resolve("google", ENV_VAR).map_err(|e| AgentError::Config {
+                message: format!("key pool resolve failed: {e}"),
             })?;
-            let mut auth = self
-                .auth
-                .lock()
-                .map_err(|e| AgentError::Config {
-                    message: format!("auth lock failed: {e}"),
-                })?;
+            let mut auth = self.auth.lock().map_err(|e| AgentError::Config {
+                message: format!("auth lock failed: {e}"),
+            })?;
             *auth = resolve_auth_from_key(pool.current());
             Ok(())
         })

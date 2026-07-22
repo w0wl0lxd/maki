@@ -860,6 +860,39 @@ fn picker_enter_stays_at_navigated() {
     assert_eq!(app.active_chat, 1);
 }
 
+#[test]
+fn picker_navigate_to_subagent_then_type_routes_prompt_to_subagent() {
+    let mut app = test_app();
+    app.status = Status::Streaming;
+    app.run_id = 1;
+    let (prompt_tx, prompt_rx) = flume::bounded::<String>(32);
+    app.update(subagent_msg(
+        AgentEvent::TextDelta { text: "x".into() },
+        "task1",
+        Some("research"),
+    ));
+    let info = subagent_info_with_channels("task1", "task1", "research", None, Some(prompt_tx));
+    app.handle_agent_event(Envelope {
+        event: AgentEvent::TextDelta { text: "x".into() },
+        subagent: Some(info),
+        run_id: 1,
+    });
+
+    app.update(Msg::Key(kb::TASKS.to_key_event()));
+    app.update(Msg::Key(key(KeyCode::Down)));
+    app.update(Msg::Key(key(KeyCode::Enter)));
+
+    assert!(!app.task_picker.is_open());
+    assert_eq!(app.active_chat, 1);
+
+    app.update(Msg::Key(key(KeyCode::Char('h'))));
+    app.update(Msg::Key(key(KeyCode::Enter)));
+
+    assert_eq!(prompt_rx.try_recv().unwrap(), "h");
+    assert_eq!(app.chats[1].last_message_text(), "h");
+    assert_eq!(app.chats[1].last_message_role(), Some(&DisplayRole::User));
+}
+
 const OVERLAY_BLOCKED_KEYS: &[KeyEvent] = &[
     kb::NEXT_CHAT.to_key_event(),
     kb::PREV_CHAT.to_key_event(),

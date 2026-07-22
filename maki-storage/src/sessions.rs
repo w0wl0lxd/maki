@@ -437,7 +437,7 @@ impl SessionLog {
         U: Serialize + DeserializeOwned + Default,
         T: Serialize + DeserializeOwned,
     {
-        let path = locate_session_file(dir, session_id)
+        let path = locate_session_file(dir, session_id)?
             .ok_or_else(|| SessionError::from(StorageError::NotFound(session_id.to_string())))?;
         let session = load_session_at::<M, U, T>(&path)?;
 

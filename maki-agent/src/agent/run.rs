@@ -594,17 +594,12 @@ pub fn estimate_message_tokens(messages: &[Message]) -> u32 {
             ContentBlock::Image { .. } => IMAGE_TOKEN_ESTIMATE,
         })
         .sum();
-    let count = total_bytes.max(CHARS_PER_TOKEN) / CHARS_PER_TOKEN;
-    match u32::try_from(count) {
-        Ok(n) => n,
-        Err(_) => {
-            warn!(
-                count,
-                "estimated token count exceeded u32 range; saturating"
-            );
-            u32::MAX
-        }
-    }
+    u32_from_usize_saturating(total)
+}
+
+#[must_use]
+pub fn estimate_tool_tokens(tools: &Value) -> u32 {
+    u32_from_usize_saturating(count_json(tools))
 }
 
 #[cfg(test)]

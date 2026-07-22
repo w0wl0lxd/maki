@@ -890,6 +890,7 @@ impl App {
                 }
             }
             InputAction::Passthrough(_)
+            | InputAction::OpenMention
             | InputAction::ContinueLine
             | InputAction::PaletteSync(_)
             | InputAction::None => vec![],

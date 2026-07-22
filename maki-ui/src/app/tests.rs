@@ -12,7 +12,7 @@ use maki_agent::{
     ImageMediaType, McpConfigErrors, McpServerInfo, McpServerStatus, McpSnapshot,
     McpSnapshotReader, ToolDoneEvent, ToolOutput, ToolStartEvent, TurnCompleteEvent,
 };
-use maki_config::{PermissionsConfig, UiConfig};
+use maki_config::{PermissionsConfig, ToolKey, UiConfig};
 use maki_lua::{HintReader, KeymapReader, LuaCommandReader};
 use maki_providers::{ContentBlock, Effort, Role, TokenUsage};
 use maki_storage::sessions::{StoredMode, StoredThinking};
@@ -2014,7 +2014,7 @@ fn stale_auth_required_after_cancel_is_dropped() {
 }
 
 #[test]
-fn send_to_agent_unknown_subagent_falls_back_to_main() {
+fn send_to_agent_unknown_subagent_does_not_fall_back_to_main() {
     let (main_tx, main_rx) = flume::unbounded();
     let mut app = test_app();
     app.status = Status::Streaming;
@@ -2026,7 +2026,7 @@ fn send_to_agent_unknown_subagent_falls_back_to_main() {
     };
     app.update(Msg::Key(key(KeyCode::Enter)));
 
-    assert_eq!(main_rx.try_recv().unwrap(), "");
+    assert!(main_rx.try_recv().is_err());
     assert_eq!(app.pending_input, PendingInput::None);
 }
 
@@ -3296,4 +3296,69 @@ fn typing_in_finished_subagent_flashes_explanation() {
     assert_eq!(app.status_bar.flash_text(), Some(STEERING_UNAVAILABLE_MSG));
     assert!(prompt_rx.try_recv().is_err());
     assert!(!app.subagent_prompts.contains_key("task1"));
+}
+
+#[test]
+fn subagent_prompt_queue_full_restores_input_and_flashes_busy() {
+    let mut app = test_app();
+    app.status = Status::Streaming;
+    app.run_id = 1;
+    let (prompt_tx, prompt_rx) = flume::bounded::<String>(1);
+    let fill_tx = prompt_tx.clone();
+    let info = subagent_info_with_channels("task1", "task1", "research", None, Some(prompt_tx));
+    app.handle_agent_event(Envelope {
+        event: AgentEvent::TextDelta { text: "x".into() },
+        subagent: Some(info),
+        run_id: 1,
+    });
+    app.active_chat = 1;
+    fill_tx.try_send("fill".into()).unwrap();
+
+    app.input_box.set_input("hi".into());
+    app.update(Msg::Key(key(KeyCode::Enter)));
+
+    assert_eq!(app.status_bar.flash_text(), Some(STEERING_BUSY_MSG));
+    assert_eq!(app.input_box.buffer.value(), "hi");
+    assert_eq!(prompt_rx.try_recv().unwrap(), "fill");
+    assert!(prompt_rx.try_recv().is_err());
+}
+
+#[test]
+fn subagent_prompt_disconnected_removes_sender_and_flashes_unavailable() {
+    let mut app = test_app();
+    app.status = Status::Streaming;
+    app.run_id = 1;
+    let (prompt_tx, _prompt_rx) = flume::bounded::<String>(1);
+    drop(_prompt_rx);
+    let info = subagent_info_with_channels("task1", "task1", "research", None, Some(prompt_tx));
+    app.handle_agent_event(Envelope {
+        event: AgentEvent::TextDelta { text: "x".into() },
+        subagent: Some(info),
+        run_id: 1,
+    });
+    app.active_chat = 1;
+
+    app.input_box.set_input("hi".into());
+    app.update(Msg::Key(key(KeyCode::Enter)));
+
+    assert_eq!(app.status_bar.flash_text(), Some(STEERING_UNAVAILABLE_MSG));
+    assert!(!app.subagent_prompts.contains_key("task1"));
+}
+
+#[test]
+fn permission_answer_to_finished_subagent_does_not_fall_back_to_main() {
+    let (mut app, sub_rx, main_rx) = app_with_subagent_tx("task1");
+    app.permission_prompt.open(
+        "perm-id".into(),
+        ToolKey::native("bash"),
+        vec!["execute".into()],
+        Some("task1".into()),
+    );
+    finish_subagent(&mut app, "task1", false);
+
+    app.update(Msg::Key(key(KeyCode::Char('y'))));
+
+    assert!(main_rx.try_recv().is_err());
+    assert!(sub_rx.try_recv().is_err());
+    assert!(!app.permission_prompt.is_open());
 }

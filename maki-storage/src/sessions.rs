@@ -433,10 +433,24 @@ impl SessionLog {
         U: Serialize + DeserializeOwned + Default,
         T: Serialize + DeserializeOwned,
     {
-        let path = jsonl_path(dir, session_id);
+        let path = locate_session_file(dir, session_id)
+            .ok_or_else(|| SessionError::from(StorageError::NotFound(session_id.to_string())))?;
+        let session = load_session_at::<M, U, T>(&path)?;
+
+        // Migrate legacy .json files to canonical .jsonl so subsequent opens
+        // skip the legacy path and the file is cleaned up.
+        let canonical = jsonl_path(dir, session_id);
+        if path != canonical {
+            let _ = remove_legacy_files(dir, session_id);
+            let file = write_session_file(dir, &session)?;
+            update_cwd_index(dir, &session.cwd, session.id)?;
+            let log = Self::cursor_from(&session, file);
+            return Ok((session, log));
+        }
+
+        // Truncate any torn tail on the canonical .jsonl file.
         let bytes = fs::read(&path).map_err(StorageError::from)?;
         let valid = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
-
         if valid < bytes.len() {
             warn!(
                 path = %path.display(),
@@ -449,16 +463,6 @@ impl SessionLog {
                 .map_err(StorageError::from)?
                 .set_len(valid as u64)
                 .map_err(StorageError::from)?;
-        }
-
-        let display = path.display().to_string();
-        let session = load_jsonl::<M, U, T>(&bytes[..valid], &display)?;
-
-        if session.id != session_id {
-            return Err(SessionError::IdMismatch {
-                log_id: session.id,
-                given_id: session_id,
-            });
         }
 
         let file = OpenOptions::new()
@@ -953,7 +957,9 @@ fn scan_headers(cwd: &str, dir: &Path) -> Result<Vec<SessionSummary>, StorageErr
     let mut cache = load_scan_cache(dir);
     let mut fresh = ScanCache::new();
     let mut dirty = false;
-    let mut selected = HashMap::<MakiId, (bool, SessionSummary)>::new();
+    // Deduplicate by session id, preferring .jsonl over legacy .json so a
+    // session that exists in both formats appears once.
+    let mut selected: HashMap<MakiId, (bool, SessionSummary)> = HashMap::new();
     for path in session_entries(dir)? {
         let from_jsonl = is_jsonl(&path);
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {

@@ -12,6 +12,9 @@ local STRUCTURED_OUTPUT_NAME = "structured_output"
 local STRUCTURED_OUTPUT_DESCRIPTION = "Report your final result. Call it exactly once when your task is complete."
 local STRUCTURED_OUTPUT_ACK = "Output recorded."
 local STRUCTURED_OUTPUT_PROMPT_SUFFIX = "\n\nWhen finished, call the structured_output tool with your final result."
+local DONE_NAME = "done"
+local DONE_DESCRIPTION = "Call when the task is complete with your final answer."
+local DONE_PROMPT_SUFFIX = "\n\nWhen finished, call the done tool with your final answer."
 local MAX_STRUCTURED_RETRIES = 2
 local MAX_SCHEMA_ERRORS = 3
 local SCHEMA_COMPILE_ERROR = "invalid output_schema"
@@ -186,9 +189,58 @@ local function handler(input, ctx)
         end,
       },
     }
+  else
+    local_tools = {
+      [DONE_NAME] = {
+        description = DONE_DESCRIPTION,
+        input_schema = {
+          type = "object",
+          properties = {
+            answer = { type = "string", description = "Final answer to return to the parent agent." },
+          },
+          required = { "answer" },
+        },
+        handler = function(value)
+          captured = value.answer
+          return "Done."
+        end,
+      },
+    }
   end
 
   local preview = make_preview(ctx, input.description or "task")
+
+  local permit = semaphore:acquire()
+
+  -- pcall so a raised error cannot leak the permit.
+  local ok, out = pcall(function()
+    local sess, sess_err = maki.agent.session(ctx, {
+      model_spec = model.spec,
+      system = system,
+      tools = tool_defs,
+      local_tools = local_tools,
+      audience = audience,
+      name = input.description,
+    })
+    if sess_err then
+      return { llm_output = sess_err, is_error = true }
+    end
+
+    local message = input.prompt
+    if validator then
+      message = message .. STRUCTURED_OUTPUT_PROMPT_SUFFIX
+    else
+      message = message .. DONE_PROMPT_SUFFIX
+    end
+
+    local result, err = sess:prompt(message)
+    local retries = 0
+    while not err and validator and not captured and retries < MAX_STRUCTURED_RETRIES do
+      retries = retries + 1
+      result, err = sess:prompt(NUDGE_MISSING)
+    end
+
+    sess:close()
 
   local function on_finish(err, result)
     if err then
@@ -201,6 +253,22 @@ local function handler(input, ctx)
         format = result.format,
       })
     end
+    if validator and not captured then
+      local msg = last_errors and (STRUCTURED_INVALID_ERROR .. ":\n" .. last_errors) or STRUCTURED_MISSING_ERROR
+      return { llm_output = msg, is_error = true }
+    end
+    if captured then
+      if type(captured) == "string" then
+        return { llm_output = captured, format = "markdown" }
+      end
+      return { llm_output = maki.json.encode(captured), format = "markdown" }
+    end
+    return { llm_output = result.text, format = "markdown" }
+  end)
+
+  permit:release()
+  if not ok then
+    error(out, 0)
   end
 
   maki.async.run(function()

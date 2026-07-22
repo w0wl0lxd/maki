@@ -16,6 +16,10 @@ rust-version = "1.88"
 name = "maki"
 path = "src/main.rs"
 
+[[bin]]
+name = "anthropic_cache_benchmark"
+path = "scripts/anthropic_cache_benchmark.rs"
+
 [dependencies]
 maki-ui = { workspace = true }
 maki-agent = { workspace = true }

@@ -189,6 +189,7 @@ impl<'h> Agent<'h> {
         self.opts = RequestOptions {
             thinking: input.thinking,
             fast: input.fast,
+            message_cache_breakpoints: 2,
         };
 
         info!(

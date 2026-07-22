@@ -25,8 +25,11 @@ use crate::{
 use maki_config::ToolOutputLines;
 use maki_storage::id::SessionRef;
 
+use crate::tokenize::{count_json, count_tokens};
+
 const MAX_REAUTH_ATTEMPTS: u32 = 2;
 const NUDGE_PROMPT: &str = "You just executed tool calls but returned an empty response. Please process the tool results above and continue with the task.";
+const IMAGE_TOKEN_ESTIMATE: usize = 2_048;
 
 pub fn resolve_compaction_model(
     provider: &Arc<dyn Provider>,
@@ -185,6 +188,8 @@ impl<'h> Agent<'h> {
         self.rollback_len = self.history.len();
         let msg = Message::user_with_images(input.message.clone(), input.images);
         self.history.push(msg);
+        self.context_size = estimate_message_tokens(self.history.as_slice())
+            .saturating_add(estimate_tool_tokens(&self.tools));
         self.mode = input.mode;
         self.workflow = input.workflow;
         self.opts = RequestOptions {
@@ -199,7 +204,11 @@ impl<'h> Agent<'h> {
             "agent run started"
         );
 
-        let result = self.run_loop().await;
+        let result = async {
+            self.try_auto_compact().await?;
+            self.run_loop().await
+        }
+        .await;
 
         if matches!(result, Err(AgentError::Cancelled)) {
             sanitize_cancelled_history(self.history, self.rollback_len);
@@ -294,8 +303,9 @@ impl<'h> Agent<'h> {
         if has_tools {
             let history_len_before = self.history.len();
             self.process_tool_calls(response).await?;
-            self.context_size +=
-                estimate_message_tokens(&self.history.as_slice()[history_len_before..]);
+            self.context_size = self.context_size.saturating_add(estimate_message_tokens(
+                &self.history.as_slice()[history_len_before..],
+            ));
         } else {
             let has_text = response.message.first_text_content().is_some();
 
@@ -466,6 +476,8 @@ impl<'h> Agent<'h> {
         self.event_tx.send(AgentEvent::CompactionDone)?;
         self.history
             .push(Message::synthetic(CONTINUE_AFTER_COMPACT.into()));
+        self.context_size = estimate_message_tokens(self.history.as_slice())
+            .saturating_add(estimate_tool_tokens(&self.tools));
         Ok(())
     }
 
@@ -500,23 +512,42 @@ impl<'h> Agent<'h> {
     }
 }
 
-const CHARS_PER_TOKEN: usize = 4;
+#[must_use]
+fn u32_from_usize_saturating(value: usize) -> u32 {
+    if let Ok(n) = u32::try_from(value) {
+        n
+    } else {
+        warn!(value, "token count exceeded u32 range; saturating");
+        u32::MAX
+    }
+}
 
+#[must_use]
 pub fn estimate_message_tokens(messages: &[Message]) -> u32 {
     if messages.is_empty() {
         return 0;
     }
-    let total_bytes: usize = messages
+    let total: usize = messages
         .iter()
         .flat_map(|m| &m.content)
-        .filter_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.len()),
-            ContentBlock::ToolResult { content, .. } => Some(content.len()),
-            ContentBlock::ToolUse { input, .. } => Some(input.to_string().len()),
-            _ => None,
+        .map(|b| match b {
+            ContentBlock::Text { text } => count_tokens(text),
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => count_tokens(thinking) + signature.as_ref().map_or(0, |s| count_tokens(s)),
+            ContentBlock::RedactedThinking { data } => count_tokens(data),
+            ContentBlock::ToolResult { content, .. } => count_tokens(content),
+            ContentBlock::ToolUse { input, .. } => count_json(input),
+            ContentBlock::Image { .. } => IMAGE_TOKEN_ESTIMATE,
         })
         .sum();
-    (total_bytes.max(CHARS_PER_TOKEN) / CHARS_PER_TOKEN) as u32
+    u32_from_usize_saturating(total)
+}
+
+#[must_use]
+pub fn estimate_tool_tokens(tools: &Value) -> u32 {
+    u32_from_usize_saturating(count_json(tools))
 }
 
 #[cfg(test)]
@@ -526,8 +557,8 @@ mod tests {
 
     use maki_providers::provider::{BoxFuture, Provider};
     use maki_providers::{
-        ContentBlock, Message, Model, ProviderEvent, RequestOptions, Role, StopReason,
-        StreamResponse, TokenUsage,
+        ContentBlock, ImageMediaType, ImageSource, Message, Model, ProviderEvent, RequestOptions,
+        Role, StopReason, StreamResponse, TokenUsage,
     };
     use serde_json::Value;
     use test_case::test_case;
@@ -536,6 +567,79 @@ mod tests {
     use crate::Envelope;
     use crate::mcp::tool_names;
     use crate::permissions::PermissionManager;
+
+    #[test]
+    fn estimate_message_tokens_counts_content_blocks() {
+        let messages = vec![Message::user("hello world".into())];
+        let tokens = estimate_message_tokens(&messages);
+        assert!(tokens > 0, "expected positive token count for messages");
+    }
+
+    #[test]
+    fn estimate_tool_tokens_counts_json() {
+        let tools = serde_json::json!([{"name": "skill", "description": "A tool"}]);
+        let tokens = estimate_tool_tokens(&tools);
+        assert!(tokens > 0, "expected positive token count for tools");
+    }
+
+    #[test]
+    fn estimate_message_tokens_empty_is_zero() {
+        assert_eq!(estimate_message_tokens(&[]), 0);
+    }
+
+    #[test]
+    fn estimate_message_tokens_counts_each_content_block() {
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text { text: "hi".into() },
+                ContentBlock::Image {
+                    source: ImageSource {
+                        media_type: ImageMediaType::Png,
+                        data: Arc::from("data"),
+                    },
+                },
+            ],
+            ..Default::default()
+        }];
+        let tokens = estimate_message_tokens(&messages);
+        assert!(
+            tokens >= u32_from_usize_saturating(IMAGE_TOKEN_ESTIMATE),
+            "image blocks should add {IMAGE_TOKEN_ESTIMATE} tokens"
+        );
+    }
+
+    #[test]
+    fn estimate_message_tokens_counts_thinking_and_signature() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "thinking text".into(),
+                    signature: Some("sig".into()),
+                },
+                ContentBlock::RedactedThinking {
+                    data: "redacted".into(),
+                },
+            ],
+            ..Default::default()
+        }];
+        let tokens = estimate_message_tokens(&messages);
+        assert!(
+            tokens > 0,
+            "thinking and redacted blocks should contribute tokens"
+        );
+    }
+
+    #[test]
+    fn estimate_tool_tokens_empty_array_costs_one() {
+        assert_eq!(estimate_tool_tokens(&serde_json::json!([])), 1);
+    }
+
+    #[test]
+    fn u32_from_usize_saturating_overflows_to_max() {
+        assert_eq!(u32_from_usize_saturating(usize::MAX), u32::MAX);
+    }
 
     struct MockInterruptSource {
         commands: Mutex<VecDeque<ExtractedCommand>>,
@@ -870,6 +974,29 @@ mod tests {
                 .await;
 
             assert!(result.is_ok());
+        });
+    }
+
+    #[test]
+    fn oversized_initial_context_compacts_before_normal_request() {
+        smol::block_on(async {
+            let prior = vec![Message::user("x".repeat(680_000))];
+            let mut history = History::new(prior);
+            let (mut agent, event_rx) = make_agent(
+                MockProvider::new(vec![
+                    text_response(StopReason::EndTurn),
+                    text_response(StopReason::EndTurn),
+                ]),
+                &mut history,
+            );
+            agent.model = Arc::new(small_context_model(200_000, 8_192));
+
+            agent.run(default_input()).await.unwrap();
+
+            assert!(has_event(&drain_events(&event_rx), |event| matches!(
+                event,
+                AgentEvent::AutoCompacting
+            )));
         });
     }
 

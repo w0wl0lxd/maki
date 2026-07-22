@@ -199,32 +199,15 @@ async fn run_command(
     max_output_lines: usize,
     max_output_bytes: usize,
 ) -> Result<String, String> {
+    let mut std_cmd: StdCommand = maki_config::bash_command(command)?;
+    std_cmd.env("GIT_TERMINAL_PROMPT", "0");
     #[cfg(unix)]
-    let std_cmd = {
-        let mut c = StdCommand::new("bash");
-        c.arg("-c").arg(command).env("GIT_TERMINAL_PROMPT", "0");
-        unsafe {
-            c.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
-        c
-    };
-    #[cfg(windows)]
-    let std_cmd = {
-        let bash = maki_config::find_bash_on_path().ok_or_else(|| {
-            "bash not found on Windows. Install Git for Windows:\n  \
-             winget install --id Git.Git -e --source winget\n  \
-             or download from https://git-scm.com/download/win\n\n  \
-             Alternatively, enable WSL: \
-             https://learn.microsoft.com/en-us/windows/wsl/install"
-                .to_string()
-        })?;
-        let mut c = StdCommand::new(bash);
-        c.arg("-c").arg(command).env("GIT_TERMINAL_PROMPT", "0");
-        c
-    };
+    unsafe {
+        std_cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
 
     let mut cmd: Command = std_cmd.into();
     cmd.stdin(Stdio::null())

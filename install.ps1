@@ -121,6 +121,15 @@ function Test-BashAvailable {
             return $true
         }
     }
+    foreach ($dir in $paths) {
+        $wslPath = Join-Path $dir.Trim('"') "wsl.exe"
+        if (Test-Path -LiteralPath $wslPath -PathType Leaf) {
+            return $true
+        }
+    }
+    if (Test-Path -LiteralPath "C:\Windows\System32\wsl.exe" -PathType Leaf) {
+        return $true
+    }
     return $false
 }
 

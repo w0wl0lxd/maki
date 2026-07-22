@@ -353,7 +353,8 @@ impl App {
                         && matches!(zone.zone, SelectionZone::Messages | SelectionZone::Input)
                     {
                         let scroll = self.scroll_offset(zone.zone);
-                        if let Some(SelectionState::Dragging { sel, .. }) = &mut self.selection_state
+                        if let Some(SelectionState::Dragging { sel, .. }) =
+                            &mut self.selection_state
                         {
                             sel.update(row, column, scroll);
                         }

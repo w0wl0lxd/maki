@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -10,7 +11,7 @@ use maki_providers::model::Model;
 use maki_providers::provider::{self, Provider};
 use maki_storage::StateDir;
 use maki_storage::id::{MakiId, SessionRef};
-use maki_storage::sessions::Session;
+use maki_storage::sessions::{Session, compact_tool_outputs};
 use serde_json::Value;
 use tracing::{error, warn};
 
@@ -63,6 +64,18 @@ impl SessionStore {
         self.session.messages = messages.to_vec();
         self.session.model = model_spec;
         self.session.update_title_if_default();
+
+        const RECENT_TURNS: usize = 3;
+        let recent_turn_start = messages.len().saturating_sub(RECENT_TURNS);
+        let mut recent_tool_ids = HashSet::new();
+
+        for msg in &messages[recent_turn_start..] {
+            for (id, _, _) in msg.tool_uses() {
+                recent_tool_ids.insert(id.to_string());
+            }
+        }
+
+        compact_tool_outputs(&mut self.session, &recent_tool_ids);
         self.save();
     }
 }

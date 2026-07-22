@@ -51,6 +51,7 @@ pub enum SlotKind {
 pub enum Slot {
     Identity,
     Tone,
+    Environment,
     ToolUsage,
     EfficientTools,
     Conventions,
@@ -62,6 +63,7 @@ impl Slot {
         match self {
             Slot::Identity => "{{identity}}",
             Slot::Tone => "{{tone}}",
+            Slot::Environment => "{{environment}}",
             Slot::ToolUsage => "{{tool_usage}}",
             Slot::EfficientTools => "{{efficient_tools}}",
             Slot::Conventions => "{{conventions}}",
@@ -71,7 +73,7 @@ impl Slot {
 
     pub fn kind(self) -> SlotKind {
         match self {
-            Slot::Identity | Slot::Tone => SlotKind::Singleton,
+            Slot::Identity | Slot::Tone | Slot::Environment => SlotKind::Singleton,
             Slot::ToolUsage
             | Slot::EfficientTools
             | Slot::Conventions
@@ -87,6 +89,7 @@ impl Slot {
         match self {
             Slot::Identity => Some(DEFAULT_IDENTITY),
             Slot::Tone => Some(DEFAULT_TONE),
+            Slot::Environment => Some(""),
             _ => None,
         }
     }

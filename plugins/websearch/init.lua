@@ -7,6 +7,12 @@ local truncate = require("maki.truncate")
 local ToolView = require("maki.tool_view")
 local output_limits = require("maki.output_limits")
 
+maki.api.register_prompt_hint({
+  prompt = "system",
+  slot = "environment",
+  content = "Current date: " .. os.date("%Y-%m-%d"),
+})
+
 local opts = maki.api.register_options(output_limits.extend({
   max_response_bytes = {
     default = 5 * 1024 * 1024,

@@ -1,18 +1,24 @@
-Provide a concise summary of the conversation above for continuation.
+Summarize the conversation above concisely. Focus on:
 
-Focus on: what was done, what's in progress, which files we're working on, and what's next.
+- Goal and current progress
+- Files being modified
+- Key user constraints
+- Next steps
 
-Template:
+Use this template:
 ---
 ## Goal
-[What goal(s) is the user trying to accomplish?]
+[What is the user trying to accomplish?]
 
-## State
-[What has been done, what is in progress, what is left? Key decisions and notable discoveries.]
+## Progress
+[What was done, what is in progress, what remains]
 
 ## Files
-[Structured list of relevant files that have been read, edited, or created]
+[Relevant files read/edited/created]
 
-## Todo
-[If a todo list was in use, repeat it verbatim with each item's current status; otherwise omit]
+## Constraints
+[Key user instructions or preferences]
+
+## Next
+[What to do next]
 ---

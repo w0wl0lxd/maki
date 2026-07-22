@@ -31,9 +31,10 @@ fn set_zone(app: &mut App, zone: SelectionZone, area: Rect) {
 
 fn build_app(dir: StateDir, writer: Arc<StorageWriter>) -> App {
     let model = test_model();
+    let cwd = dir.path().to_string_lossy().to_string();
     App::new(
         &model,
-        AppSession::new("test-model", "/tmp/test"),
+        AppSession::new("test-model", &cwd),
         dir,
         Arc::new(ArcSwapOption::empty()),
         McpSnapshotReader::empty(),
@@ -940,6 +941,26 @@ fn overlay_blocks_ctrl_shortcuts(setup: fn(&mut App)) {
         scroll_before,
         "scroll changed through overlay"
     );
+}
+
+#[test]
+fn at_mention_does_not_open_flyout_mid_word() {
+    let mut app = test_app();
+    for c in "em".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    app.update(Msg::Key(key(KeyCode::Char('@'))));
+    assert!(!app.mention_flyout.is_open());
+    assert_eq!(app.input_box.buffer.value(), "em@");
+}
+
+#[test]
+fn ctrl_s_file_picker_unaffected_by_at_mention_flag() {
+    let mut app = test_app();
+    app.update(Msg::Key(key(KeyCode::Char('x'))));
+    app.update(Msg::Key(kb::FILE_PICKER.to_key_event()));
+    assert!(app.file_picker.is_open());
+    assert_eq!(app.input_box.buffer.value(), "x");
 }
 
 #[test]

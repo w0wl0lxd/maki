@@ -7,7 +7,7 @@ local truncate = require("maki.truncate")
 local ToolView = require("maki.tool_view")
 local output_limits = require("maki.output_limits")
 
-maki.api.register_prompt_hint({
+maki.api.set_prompt({
   prompt = "system",
   slot = "environment",
   content = "Current date: " .. os.date("%Y-%m-%d"),

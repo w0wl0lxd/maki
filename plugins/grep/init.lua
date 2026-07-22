@@ -196,13 +196,8 @@ maki.api.register_prompt_hint({
 maki.api.register_tool({
   name = "grep",
   kind = "search",
-  description = [[Search file contents using regex.
-
-- Respects .gitignore.
-- Results grouped by file, sorted by modification time.
-- Prefer speculative parallel searches over sequential rounds of glob+grep.
-- Do NOT wrap the pattern in quotes. Do NOT double-escape (e.g. `\[` not `\\[`).
-- Multi-line matching is auto-enabled when the pattern contains `\n`, `(?s)`, or `(?m)`.]],
+  modes = { "default", "research", "build", "compact" },
+  description = [[Search file contents using regex. Respects .gitignore. Results grouped by file, sorted by modification time. Prefer speculative parallel searches over sequential glob+grep. Do NOT wrap pattern in quotes or double-escape (e.g. `\[` not `\\[`). Multi-line matching auto-enabled when pattern contains `\n`, `(?s)`, or `(?m)`.]],
 
   schema = {
     type = "object",

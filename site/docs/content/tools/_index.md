@@ -13,8 +13,7 @@ Maki ships with 20 built-in tools. This is the full reference.
 
 ### `bash` *(lua plugin)*
 
-Execute a bash command.
-Commands run in <cwd> by default.
+Execute a bash command. Default dir: <cwd>. DO NOT use for file ops - only git, builds, tests, system commands. Use `workdir` instead of `cd && cmd`. Chain dependent commands with `&&`. Use batch for independent ones. Provide short `description` (3-5 words). Output truncated beyond 2000 lines or 50KB. Interactive commands (sudo, ssh) fail immediately.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -35,7 +34,7 @@ Read a file or directory. Returns contents with line numbers (1-indexed).
 
 ### `write` *(lua plugin)*
 
-Write content to a file, replacing existing content.
+Write content to a file, replacing existing content. Creates parent directories. Always read first. Never create files unless necessary. Never proactively create docs (*.md, README) unless requested.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -44,7 +43,7 @@ Write content to a file, replacing existing content.
 
 ### `edit` *(lua plugin)*
 
-Replace an exact string match in a file.
+Replace an exact string match in a file. old_string must appear exactly once unless replace_all is true. Read file first. When copying from read output, exclude line number prefix (e.g. `42: `). Prefer over write for targeted changes. Use replace_all for renaming.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -55,8 +54,7 @@ Replace an exact string match in a file.
 
 ### `multiedit` *(lua plugin)*
 
-Make multiple find-and-replace edits to a single file atomically.
-Prefer this over edit when making multiple changes to the same file.
+Make multiple find-and-replace edits to a single file atomically. Prefer over edit for multiple changes. Read file first. old_string must match exactly, including whitespace. Each edit must match exactly once unless replace_all. Edits applied in sequence. If any edit fails, none are written. Ensure earlier edits don't affect later edits.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -65,7 +63,7 @@ Prefer this over edit when making multiple changes to the same file.
 
 ### `edit_lines` *(lua plugin, opt-in)*
 
-Edit lines by number. Replaces lines from `start` to `end` (inclusive) with `new_string`. Use empty `new_string` to delete a range. Do not use with the batch tool.
+Edit lines by number. Replaces lines from `start` to `end` (inclusive) with `new_string`. Use empty `new_string` to delete. Do not use with batch.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -76,7 +74,7 @@ Edit lines by number. Replaces lines from `start` to `end` (inclusive) with `new
 
 ### `insert_lines` *(lua plugin, opt-in)*
 
-Insert lines before a given line number. Lines at `line` and below shift down. Existing lines are preserved. Do not use with the batch tool.
+Insert lines before a given line number. Lines at `line` and below shift down. Existing lines preserved. Do not use with batch.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -86,7 +84,7 @@ Insert lines before a given line number. Lines at `line` and below shift down. E
 
 ### `glob` *(lua plugin)*
 
-Find files by glob pattern.
+Find files by glob pattern. Respects .gitignore. Returns absolute paths sorted by modification time (newest first). Prefer speculative parallel searches over sequential glob+grep.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -95,7 +93,7 @@ Find files by glob pattern.
 
 ### `grep` *(lua plugin)*
 
-Search file contents using regex.
+Search file contents using regex. Respects .gitignore. Results grouped by file, sorted by modification time. Prefer speculative parallel searches over sequential glob+grep. Do NOT wrap pattern in quotes or double-escape (e.g. `\[` not `\\[`). Multi-line matching auto-enabled when pattern contains `\n`, `(?s)`, or `(?m)`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -108,7 +106,7 @@ Search file contents using regex.
 
 ### `index` *(lua plugin)*
 
-Return a compact overview of a source file: imports, type definitions, function signatures, and structure with their line numbers surrounded by []. ~70-90% more efficient than reading the full file.
+Return a compact overview of a source file: imports, types, function signatures, and structure with line numbers in []. ~70-90% more efficient than reading full file. Use FIRST to understand structure before read with offset/limit. Supports source files and markdown. Falls back with error on unsupported languages.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -116,7 +114,7 @@ Return a compact overview of a source file: imports, type definitions, function 
 
 ### `view_image` *(lua plugin)*
 
-View an image file (png, jpeg, gif, webp) so you can actually see it; it is returned as vision input alongside the tool result. Use instead of `read` for images.
+View an image file (png, jpeg, gif, webp) as vision input. Use instead of `read` for images. Paths: absolute, relative, or ~/. Oversized images downscaled automatically (animated gif/webp keep only first frame).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -126,7 +124,7 @@ View an image file (png, jpeg, gif, webp) so you can actually see it; it is retu
 
 ### `batch` *(lua plugin)*
 
-Executes multiple independent tool calls concurrently to reduce round-trips.
+Execute multiple independent tool calls concurrently. ALWAYS use batch for multiple independent calls. 1-25 tools per batch. Parallel execution, order not guaranteed. Partial failures don't stop others. Do NOT nest batch. Use code_execution for dependent operations.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -134,7 +132,7 @@ Executes multiple independent tool calls concurrently to reduce round-trips.
 
 ### `code_execution` *(lua plugin)*
 
-Execute Python code in a sandboxed interpreter with tools as callable functions.
+Execute Python code in a sandboxed interpreter with tools as callable functions. Use for chained/dependent tool calls and filtering/processing results. Faster than sequential tool calls. Tools are async: `result = await read(path='file.txt')`. Use `asyncio.gather()` for concurrency. Available libs: re, asyncio, sys, os, json. Fresh sandbox each run. 30s timeout (configurable).
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
@@ -143,11 +141,7 @@ Execute Python code in a sandboxed interpreter with tools as callable functions.
 
 ### `question` *(lua plugin)*
 
-Use this tool when you need to ask the user questions during execution. This allows you to:
-- Gather user preferences or requirements
-- Clarify ambiguous instructions
-- Get decisions on implementation choices as you work
-- Offer choices to the user about what direction to take
+Ask the user questions during execution. Supports single/multi-select, custom answers, and tabbed multi-question forms. Put recommended options first with "(Recommended)" suffix.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -157,19 +151,19 @@ Use this tool when you need to ask the user questions during execution. This all
 
 ### `task` *(lua plugin)*
 
-Launch an autonomous subagent to perform tasks independently. Best combined with batch.
+Launch an autonomous subagent. Types: research (read-only, default) or general (full access). Best combined with batch. Each invocation starts fresh - inline context. Summarize results in your response.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `description` | string | yes | Short (3-5 words) description of the task |
-| `model_tier` | string | no | Optional capped tier: "weak" for simple work, "medium" for normal changes, or "strong" for complex/critical work. |
+| `model_tier` | string | no | Model tier (optional, omit to use current model, capped at current tier): "strong" (deep reasoning, ~5x cost), "medium" (balanced), "weak" (fast/cheap). |
 | `output_schema` | string | no | JSON Schema (object) the subagent's final result must match. When set, the result is returned as a validated JSON string. |
 | `prompt` | string | yes | Detailed task prompt for the agent |
 | `subagent_type` | string | no | Subagent type: "research" (read-only, default) or "general" (can modify files) |
 
 ### `todo_write` *(lua plugin)*
 
-Create or update a structured todo list to track tasks.
+Create or update a structured todo list to track tasks. Use after EACH completed step. Send complete list each time (replace-all semantics). Use ONLY for multi-step work (3+ steps). Skip for trivial tasks.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -177,7 +171,7 @@ Create or update a structured todo list to track tasks.
 
 ### `memory` *(lua plugin)*
 
-Persistent, project-scoped scratchpad for learnings, patterns, decisions, and gotchas across sessions.
+Persistent, project-scoped scratchpad for learnings, patterns, decisions, and gotchas across sessions. Save important context before compaction or to build project knowledge. Keep entries concise and current. Delete outdated information.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -198,7 +192,7 @@ Load a skill that provides instructions and workflows for specific tasks. Use `l
 
 ### `webfetch` *(lua plugin)*
 
-Fetch a URL and return its contents.
+Fetch a URL and return its contents. Supports markdown (default), text, or html. HTTP auto-upgraded to HTTPS. Max 5MB response, 120s timeout. Best used inside code_execution to avoid context bloat.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|

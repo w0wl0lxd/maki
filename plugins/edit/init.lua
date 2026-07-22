@@ -7,30 +7,16 @@ local SNIPPET_MAX_CHARS = 32
 local FALLBACK_VIEW_LINES = 10
 
 local EDIT_LINES_DESCRIPTION =
-  [[Edit lines by number. Replaces lines from `start` to `end` (inclusive) with `new_string`. Use empty `new_string` to delete a range. Do not use with the batch tool.]]
+  [[Edit lines by number. Replaces lines from `start` to `end` (inclusive) with `new_string`. Use empty `new_string` to delete. Do not use with batch.]]
 
 local INSERT_LINES_DESCRIPTION =
-  [[Insert lines before a given line number. Lines at `line` and below shift down. Existing lines are preserved. Do not use with the batch tool.]]
+  [[Insert lines before a given line number. Lines at `line` and below shift down. Existing lines preserved. Do not use with batch.]]
 
-local EDIT_DESCRIPTION = [[Replace an exact string match in a file.
+local EDIT_DESCRIPTION =
+  [[Replace an exact string match in a file. old_string must appear exactly once unless replace_all is true. Read file first. When copying from read output, exclude line number prefix (e.g. `42: `). Prefer over write for targeted changes. Use replace_all for renaming.]]
 
-- The old_string must appear exactly once unless replace_all is true.
-- Read the file first to get exact content.
-- When copying text from read output, do NOT include the line number prefix (e.g. `42: `) - only the content after it.
-- Prefer this over write for targeted changes - it uses far fewer tokens.
-- Use replace_all for renaming across a file.
-]]
-
-local MULTIEDIT_DESCRIPTION = [[Make multiple find-and-replace edits to a single file atomically.
-Prefer this over edit when making multiple changes to the same file.
-
-- Read the file first to get exact content.
-- old_string must match the file contents exactly, including all whitespace and indentation.
-- Each edit must match exactly once unless replace_all is true. Use replace_all for renaming across a file.
-- Edits are applied in sequence - each operates on the result of the previous.
-- If any edit fails, none are written.
-- Ensure earlier edits don't affect text that later edits need to find.
-]]
+local MULTIEDIT_DESCRIPTION =
+  [[Make multiple find-and-replace edits to a single file atomically. Prefer over edit for multiple changes. Read file first. old_string must match exactly, including whitespace. Each edit must match exactly once unless replace_all. Edits applied in sequence. If any edit fails, none are written. Ensure earlier edits don't affect later edits.]]
 
 local function edit_header(input)
   local buf = maki.ui.buf()

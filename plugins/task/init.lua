@@ -29,18 +29,8 @@ local BODY_INDENT_COLS = 4
 local MIN_MD_WIDTH = 20
 local DEFAULT_OUTPUT_LINES = 5
 
-local description = [[Launch an autonomous subagent to perform tasks independently. Best combined with batch.
-
-Subagent types (set via `subagent_type`):
-- `research` (default): Read-only tools. For codebase exploration or gathering context.
-- `general`: Full tool access. For delegating implementation work.
-
-Notes:
-1. Launch multiple tasks concurrently when possible.
-2. The agent's result is not visible to the user. Summarize it in your response.
-3. Each invocation starts fresh - inline any needed context into the prompt.
-4. Tell it to return concise summaries with file:line refs, not full file contents.
-]]
+local description =
+  [[Launch an autonomous subagent. Types: research (read-only, default) or general (full access). Best combined with batch. Each invocation starts fresh - inline context. Summarize results in your response.]]
 
 local schema = {
   type = "object",
@@ -61,19 +51,11 @@ local schema = {
     },
     model_tier = {
       type = "string",
-      description = 'Optional capped tier: "weak" for simple work, "medium" for normal changes, or "strong" for complex/critical work.',
+      description = 'Model tier (optional, omit to use current model, capped at current tier): "strong" (deep reasoning, ~5x cost), "medium" (balanced), "weak" (fast/cheap).',
     },
     output_schema = {
       description = "JSON Schema (object) the subagent's final result must match. When set, the result is returned as a validated JSON string.",
     },
-  },
-}
-
-local examples = {
-  {
-    description = "Find auth middleware",
-    prompt = "Search the codebase for authentication middleware. Return file paths and a summary of how auth is implemented.",
-    model_tier = "weak",
   },
 }
 
@@ -366,7 +348,6 @@ maki.api.register_tool({
   description = description,
   kind = "execute",
   audiences = { "main", "workflow" },
-  examples = examples,
   schema = schema,
   handler = handler,
   header = header,

@@ -157,7 +157,7 @@ fn build_lines(ctx: &UsageModalContext, theme: &crate::theme::Theme) -> Vec<Line
     if let Some(state) = ctx.quota {
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(
-            format!("{PREFIX}{} quota", ctx.model.provider.display_name()),
+            format!("{PREFIX}{} quota", ctx.model.provider_display_name()),
             theme.keybind_section,
         )));
         lines.extend(quota_lines(state, theme));
@@ -318,11 +318,14 @@ fn quota_lines(state: &UsageFetchState, theme: &crate::theme::Theme) -> Vec<Line
                 .max()
                 .unwrap_or(0);
             for limit in &usage.limits {
-                let mut spans = vec![
-                    Span::styled(format!("{PREFIX}{:<label_w$}", limit.label), fg),
-                    Span::styled(format!("{:>3}%", limit.percentage), theme.accent),
-                    Span::styled(" used", dim),
-                ];
+                let mut spans = vec![Span::styled(
+                    format!("{PREFIX}{:<label_w$}", limit.label),
+                    fg,
+                )];
+                if let Some(pct) = limit.percentage {
+                    spans.push(Span::styled(format!("{pct:>3}%"), theme.accent));
+                    spans.push(Span::styled(" used", dim));
+                }
                 if let Some(detail) = &limit.detail {
                     spans.push(Span::styled(format!("  {detail}"), dim));
                 }
@@ -414,13 +417,13 @@ mod tests {
             limits: vec![
                 UsageLimit {
                     label: "Current session".into(),
-                    percentage: 16,
+                    percentage: Some(16),
                     reset_at: Some(0),
                     detail: None,
                 },
                 UsageLimit {
                     label: "Usage credits".into(),
-                    percentage: 4,
+                    percentage: Some(4),
                     reset_at: None,
                     detail: Some("$2.33 spent".into()),
                 },

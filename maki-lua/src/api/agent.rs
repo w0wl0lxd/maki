@@ -21,7 +21,7 @@ use maki_agent::tools::{
 };
 use maki_agent::{
     Agent, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, Envelope, EventSender,
-    History, SubagentInfo, ToolDoneEvent,
+    History, McpSession, SubagentInfo, ToolDoneEvent,
 };
 use maki_lua_macro::{lua_class, lua_fn, lua_table};
 use maki_providers::model::ModelTier;
@@ -49,25 +49,15 @@ fn resolve_model_from_ctx(ctx: &AgentContext, tier: Option<&str>) -> Result<Mode
     if effective == ctx.model.tier {
         return Ok(Model::clone(&ctx.model));
     }
+    let slug = &ctx.model.provider;
     let map = maki_providers::model_registry::model_registry()
         .read()
         .unwrap();
-    ctx.model
-        .dynamic_slug
-        .is_none()
-        .then(|| map.spec_for_tier(ctx.model.provider, effective))
-        .flatten()
+    map.spec_for_tier(slug, effective)
         .or_else(|| map.spec_for_tier_any(effective))
         .and_then(|s| Model::from_spec(&s).ok())
         .map(Ok)
-        .unwrap_or_else(|| {
-            Model::from_tier_dynamic(
-                ctx.model.provider,
-                effective,
-                ctx.model.dynamic_slug.as_deref(),
-            )
-            .map_err(|e| e.to_string())
-        })
+        .unwrap_or_else(|| Model::from_tier_dynamic(slug, effective).map_err(|e| e.to_string()))
 }
 
 fn model_to_lua_table(lua: &Lua, model: &Model) -> LuaResult<Table> {
@@ -201,7 +191,6 @@ async fn system_prompt(
 /// Optional fields:
 ///   `only` (string[]?) - include only these tool names.
 ///   `except` (string[]?) - exclude these tool names.
-///   `include_mcp` (boolean?) - include MCP tools. Default: `true`.
 ///   `workflow` (boolean?) - use workflow-mode descriptions. Default: `false`.
 ///   `spec` (string?) - evaluate capability exclusions against this model spec.
 /// @return (table?, string?) Array of tool definition tables, or `(nil, err)` on failure.
@@ -223,7 +212,6 @@ async fn tools(lua: Lua, ctx: mlua::UserDataRef<LuaCtx>, opts: Table) -> LuaResu
 
     let only: Option<Vec<String>> = opts.get("only")?;
     let except: Option<Vec<String>> = opts.get("except")?;
-    let include_mcp: bool = opts.get::<Option<bool>>("include_mcp")?.unwrap_or(true);
     let workflow: bool = opts.get::<Option<bool>>("workflow")?.unwrap_or(false);
     let spec_str: Option<String> = opts.get("spec")?;
 
@@ -253,12 +241,9 @@ async fn tools(lua: Lua, ctx: mlua::UserDataRef<LuaCtx>, opts: Table) -> LuaResu
         audience,
         workflow,
     };
-    let mut defs =
-        ToolRegistry::global().definitions(&vars, &ctx_desc, model.supports_tool_examples());
-
-    if include_mcp && let Some(ref mcp) = agent.mcp {
-        mcp.extend_tools(&mut defs);
-    }
+    // Base definitions only: the session injects MCP definitions per
+    // request, so baking them into a tools array would freeze the catalog.
+    let defs = ToolRegistry::global().definitions(&vars, &ctx_desc, model.supports_tool_examples());
 
     Ok((Some(json_to_lua(&lua, &defs)?), None))
 }
@@ -353,6 +338,10 @@ async fn call_tool(
 ///     `(string)` or `(nil, err)`.
 ///   `name` (string?) - display name for logs and UI.
 ///   `audience` (string?) - tool audience for capability gating. Default: `"general_sub"`.
+///   `mcp` (boolean?) - give the session access to MCP tools. Their
+///     definitions are injected automatically each turn (deferred behind
+///     `tool_search`), so don't put MCP definitions in `tools`. The session
+///     starts with no loaded tools of its own. Default: `true`.
 ///   `thinking` (string|integer?) - thinking mode: `"off"`, `"adaptive"`, an
 ///     effort level (`"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`,
 ///     `"max"`), or a budget integer (token count). Inherits parent setting
@@ -392,6 +381,7 @@ async fn session(
     let fast: bool = opts
         .get::<Option<bool>>("fast")?
         .unwrap_or(agent_ctx.opts.fast);
+    let mcp_enabled: bool = opts.get::<Option<bool>>("mcp")?.unwrap_or(true);
 
     let (model, provider): (Model, Arc<dyn provider::Provider>) = if let Some(ref spec) = model_spec
     {
@@ -538,7 +528,11 @@ async fn session(
         tools: tools_json,
         thinking,
         fast,
-        mcp: agent_ctx.mcp.clone(),
+        mcp: agent_ctx
+            .mcp
+            .as_ref()
+            .filter(|_| mcp_enabled)
+            .map(McpSession::fresh),
         history: History::new(Vec::new()),
         sub_event_tx,
         child_cancel,
@@ -658,7 +652,9 @@ struct SessionState {
     tools: JsonValue,
     thinking: ThinkingConfig,
     fast: bool,
-    mcp: Option<maki_agent::mcp::McpHandle>,
+    /// Fresh per session so `tool_search` loads never leak between a
+    /// subagent and its parent.
+    mcp: Option<McpSession>,
     history: History,
     sub_event_tx: EventSender,
     child_cancel: maki_agent::cancel::CancelToken,

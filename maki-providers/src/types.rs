@@ -615,7 +615,8 @@ pub struct UsageLimit {
     /// Human-readable label for the window, provided by the provider.
     pub label: String,
     /// Usage percentage within the window, 0-100.
-    pub percentage: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percentage: Option<u32>,
     /// When the window resets, as epoch milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reset_at: Option<u64>,
@@ -876,8 +877,7 @@ mod tests {
     fn clamp_test_model(provider: crate::provider::ProviderKind) -> crate::model::Model {
         crate::model::Model {
             id: "test-model".into(),
-            provider,
-            dynamic_slug: None,
+            provider: std::sync::Arc::<str>::from(provider.to_string()),
             tier: crate::model::ModelTier::Medium,
             family: provider.family(),
             supports_tool_examples_override: None,

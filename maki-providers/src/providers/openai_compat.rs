@@ -15,6 +15,7 @@ use crate::{
 const STREAM_DONE: &str = "[DONE]";
 
 pub(crate) struct OpenAiCompatConfig {
+    pub slug: &'static str,
     pub api_key_env: &'static str,
     pub base_url: &'static str,
     pub max_tokens_field: &'static str,
@@ -120,13 +121,23 @@ impl OpenAiCompatProvider {
         body
     }
 
+    /// Effective base URL: an auth-supplied value (dynamic/custom providers)
+    /// wins, then the `<SLUG>_BASE_URL` env override, then the static default.
+    fn base_url(&self, auth: &ResolvedAuth) -> String {
+        if let Some(explicit) = auth.base_url.as_deref() {
+            return explicit.to_string();
+        }
+        maki_config::providers::base_url_override(self.config.slug)
+            .unwrap_or_else(|| self.config.base_url.to_string())
+    }
+
     fn build_request(
         &self,
         method: &str,
         path: &str,
         auth: &ResolvedAuth,
     ) -> isahc::http::request::Builder {
-        let base = auth.base_url.as_deref().unwrap_or(self.config.base_url);
+        let base = self.base_url(auth);
         auth.configure_request(
             Request::builder()
                 .method(method)
@@ -179,7 +190,7 @@ impl OpenAiCompatProvider {
         auth: &ResolvedAuth,
         parse_fn: impl Fn(&Value) -> Option<crate::model::ModelInfo>,
     ) -> Result<Vec<crate::model::ModelInfo>, AgentError> {
-        let base = auth.base_url.as_deref().unwrap_or(self.config.base_url);
+        let base = self.base_url(auth);
         let url = format!("{base}/models");
         let body_text = self.get_text(auth, &url).await?;
         let body: Value = serde_json::from_str(&body_text)?;
@@ -319,12 +330,10 @@ pub fn convert_messages(messages: &[Message], system: &str) -> Vec<Value> {
                 }
 
                 if !text.is_empty() || !tool_calls.is_empty() || !reasoning_text.is_empty() {
-                    let mut msg_obj = json!({"role": "assistant"});
-                    if !text.is_empty() {
-                        msg_obj["content"] = Value::String(text);
-                    } else if !reasoning_text.is_empty() {
-                        msg_obj["content"] = Value::String(String::new());
-                    }
+                    // Always emit string `content` (""): some OpenAI-compatible
+                    // backends (e.g. Cloudflare Workers AI gpt-oss) reject
+                    // omitted/null content on assistant tool-call messages.
+                    let mut msg_obj = json!({"role": "assistant", "content": text});
                     if !reasoning_text.is_empty() {
                         msg_obj["reasoning_content"] = Value::String(reasoning_text);
                     }
@@ -430,6 +439,9 @@ struct ChunkUsage {
     #[serde(default)]
     completion_tokens: u32,
     prompt_tokens_details: Option<PromptTokensDetails>,
+    /// DeepSeek reports cache hits here instead of `prompt_tokens_details`.
+    #[serde(default)]
+    prompt_cache_hit_tokens: u32,
 }
 
 #[derive(Deserialize)]
@@ -488,8 +500,8 @@ pub async fn parse_sse(
         if let Some(u) = chunk.usage {
             let cached = u
                 .prompt_tokens_details
-                .map(|d| d.cached_tokens)
-                .unwrap_or(0);
+                .map_or(0, |d| d.cached_tokens)
+                .max(u.prompt_cache_hit_tokens);
             usage = TokenUsage {
                 input: u.prompt_tokens.saturating_sub(cached),
                 output: u.completion_tokens,
@@ -706,6 +718,25 @@ data: [DONE]\n";
     }
 
     #[test]
+    fn parse_sse_deepseek_cache_hit_tokens() {
+        smol::block_on(async {
+            let sse = "\
+data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"prompt_cache_hit_tokens\":80,\"prompt_cache_miss_tokens\":20}}\n\
+\n\
+data: [DONE]\n";
+
+            let (tx, _rx) = flume::unbounded();
+            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
+                .await
+                .unwrap();
+
+            assert_eq!(resp.usage.input, 20);
+            assert_eq!(resp.usage.cache_read, 80);
+            assert_eq!(resp.usage.output, 10);
+        })
+    }
+
+    #[test]
     fn parse_sse_reasoning_and_content() {
         smol::block_on(async {
             let sse = "\
@@ -789,6 +820,30 @@ data: [DONE]\n";
         assert_eq!(wire[3]["role"], "tool");
         assert_eq!(wire[3]["tool_call_id"], "tc_1");
         assert_eq!(wire[3]["content"], "file.txt");
+    }
+
+    #[test]
+    fn convert_messages_assistant_tool_calls_only_has_content() {
+        let messages = vec![
+            Message::user("list files".to_string()),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "tc_1".to_string(),
+                    name: "bash".to_string(),
+                    input: json!({"command": "ls"}),
+                }],
+                ..Default::default()
+            },
+        ];
+
+        let wire = convert_messages(&messages, "be helpful");
+
+        assert_eq!(wire[2]["role"], "assistant");
+        // `content` must be a present string ("") even with only tool_calls;
+        // strict OpenAI-compatible backends reject null/omitted content.
+        assert_eq!(wire[2]["content"], "");
+        assert_eq!(wire[2]["tool_calls"][0]["function"]["name"], "bash");
     }
 
     #[test]

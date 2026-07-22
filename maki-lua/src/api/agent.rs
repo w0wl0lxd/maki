@@ -41,6 +41,7 @@ const SESSION_CLOSED_ERR: &str = "session closed";
 const DEFAULT_SESSION_AUDIENCE: ToolAudience = ToolAudience::GENERAL_SUB;
 const PROGRESS_MAX_RECENT: usize = 5;
 const PROGRESS_TIMEOUT_MS: u64 = 500;
+const STEERING_QUEUE_CAPACITY: usize = 32;
 
 fn resolve_model_from_ctx(ctx: &AgentContext, tier: Option<&str>) -> Result<Model, String> {
     let Some(tier_str) = tier else {
@@ -476,6 +477,7 @@ async fn session(
     let sub_event_tx = EventSender::new(sub_tx, agent_ctx.event_tx.run_id());
     let parent_tx = agent_ctx.event_tx.clone();
     let (answer_tx, answer_rx) = flume::unbounded::<String>();
+    let (prompt_tx, prompt_rx) = flume::bounded::<String>(STEERING_QUEUE_CAPACITY);
     let progress = Arc::new(Progress::new(start));
 
     let subagent_info: Arc<OnceLock<SubagentInfo>> = Arc::new(OnceLock::new());
@@ -554,6 +556,8 @@ async fn session(
         child_cancel,
         answer_rx: Arc::new(AsyncMutex::new(answer_rx)),
         answer_tx: Some(answer_tx),
+        prompt_rx,
+        prompt_tx: Some(prompt_tx),
         parent_cancels: Arc::clone(&agent_ctx.subagent_cancels),
         ui_id,
         parent_event_tx: parent_tx,
@@ -738,6 +742,8 @@ struct SessionState {
     child_cancel: maki_agent::cancel::CancelToken,
     answer_rx: Arc<AsyncMutex<flume::Receiver<String>>>,
     answer_tx: Option<flume::Sender<String>>,
+    prompt_rx: flume::Receiver<String>,
+    prompt_tx: Option<flume::Sender<String>>,
     parent_cancels: Arc<CancelMap<String>>,
     /// Stable identity for UI, cancel, and history. Falls back to a synthetic
     /// id for workflow-mode sessions (no model-issued tool call exists).
@@ -773,6 +779,30 @@ impl SessionState {
             output_tokens = self.total_output.load(Ordering::Relaxed),
             "subagent session closed",
         );
+    }
+}
+
+struct PromptInterruptSource {
+    rx: flume::Receiver<String>,
+}
+
+impl maki_agent::InterruptSource for PromptInterruptSource {
+    fn poll(&self) -> Option<maki_agent::ExtractedCommand> {
+        self.rx.try_recv().ok().map(|message| {
+            maki_agent::ExtractedCommand::Interrupt(
+                AgentInput {
+                    message,
+                    mode: AgentMode::Build,
+                    images: Vec::new(),
+                    preamble: Vec::new(),
+                    thinking: ThinkingConfig::default(),
+                    fast: false,
+                    workflow: false,
+                    prompt: None,
+                },
+                1,
+            )
+        })
     }
 }
 
@@ -829,39 +859,48 @@ async fn prompt(
             prompt: Some(message.clone()),
             model: Some(s.params.model.spec()),
             answer_tx: s.answer_tx.take(),
+            prompt_tx: s.prompt_tx.take(),
         });
     }
 
-    let mut agent = Agent::new(
-        s.params.clone(),
-        AgentRunParams {
-            history: &mut s.history,
-            system: s.system.clone(),
-            event_tx: s.sub_event_tx.clone(),
-            tools: s.tools.clone(),
-        },
-    )
-    .with_user_response_rx(Arc::clone(&s.answer_rx))
-    .with_cancel(s.child_cancel.clone())
-    .with_mcp(s.mcp.clone())
-    .with_local_tools(Arc::clone(&s.local_tools));
+    let mut next_message = Some(message);
+    while let Some(message) = next_message.take() {
+        let mut agent = Agent::new(
+            s.params.clone(),
+            AgentRunParams {
+                history: &mut s.history,
+                system: s.system.clone(),
+                event_tx: s.sub_event_tx.clone(),
+                tools: s.tools.clone(),
+            },
+        )
+        .with_user_response_rx(Arc::clone(&s.answer_rx))
+        .with_interrupt_source(Arc::new(PromptInterruptSource {
+            rx: s.prompt_rx.clone(),
+        }))
+        .with_cancel(s.child_cancel.clone())
+        .with_mcp(s.mcp.clone())
+        .with_local_tools(Arc::clone(&s.local_tools));
 
-    let input = AgentInput {
-        message,
-        mode: AgentMode::Build,
-        images: Vec::new(),
-        preamble: Vec::new(),
-        thinking: s.thinking,
-        fast: s.fast,
-        workflow: false,
-        prompt: None,
-    };
-    let result = agent.run(input).await;
-    drop(agent);
-    s.progress.set_done();
-    if let Err(e) = result {
-        return Ok((None, Some(e.to_string())));
+        let input = AgentInput {
+            message,
+            mode: AgentMode::Build,
+            images: Vec::new(),
+            preamble: Vec::new(),
+            thinking: s.thinking,
+            fast: s.fast,
+            workflow: false,
+            prompt: None,
+        };
+        let result = agent.run(input).await;
+        drop(agent);
+        if let Err(e) = result {
+            s.progress.set_done();
+            return Ok((None, Some(e.to_string())));
+        }
+        next_message = s.prompt_rx.try_recv().ok();
     }
+    s.progress.set_done();
 
     let text = s
         .history

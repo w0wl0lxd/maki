@@ -101,12 +101,23 @@ fn subagent_info_with_tx(
     name: &str,
     answer_tx: Option<flume::Sender<String>>,
 ) -> SubagentInfo {
+    subagent_info_with_channels(parent_id, parent_id, name, answer_tx, None)
+}
+
+fn subagent_info_with_channels(
+    session_id: &str,
+    _parent_id: &str,
+    name: &str,
+    answer_tx: Option<flume::Sender<String>>,
+    prompt_tx: Option<flume::Sender<String>>,
+) -> SubagentInfo {
     SubagentInfo {
-        parent_tool_use_id: parent_id.into(),
+        parent_tool_use_id: session_id.into(),
         name: name.into(),
         prompt: None,
         model: None,
         answer_tx,
+        prompt_tx,
     }
 }
 
@@ -3097,4 +3108,96 @@ fn subagent_cancel_then_navigate_back_main_unaffected() {
     assert_eq!(app.active_chat, 0);
     assert_eq!(app.status, Status::Streaming);
     assert!(!app.chats[0].is_finished());
+}
+
+#[test_case("task"     ; "task")]
+#[test_case("agent"    ; "agent")]
+#[test_case("team"     ; "team")]
+#[test_case("workflow" ; "workflow")]
+fn ctrl_click_subagent_card_header_enters_chat(tool: &str) {
+    let mut app = test_app();
+    app.status = Status::Streaming;
+    app.run_id = 1;
+    app.update(agent_msg(AgentEvent::ToolStart(Box::new(ToolStartEvent {
+        id: "card1".into(),
+        tool: tool.into(),
+        summary: "safe summary".into(),
+        annotation: Some("safe annotation".into()),
+        input: None,
+        raw_input: None,
+        output: None,
+        render_header: None,
+    }))));
+    app.update(subagent_msg(
+        AgentEvent::TextDelta {
+            text: "child".into(),
+        },
+        "card1",
+        Some("research"),
+    ));
+    app.update(agent_msg(AgentEvent::ToolDone(Box::new(ToolDoneEvent {
+        id: "card1".into(),
+        tool: tool.into(),
+        output: ToolOutput::Markdown("body line\n".repeat(100).into()),
+        is_error: false,
+        annotation: None,
+        written_path: None,
+    }))));
+    let area = Rect::new(0, 0, 80, 80);
+    set_zone(&mut app, SelectionZone::Messages, area);
+
+    let ctrl_click = |app: &mut App, row| {
+        app.update(Msg::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row,
+            modifiers: KeyModifiers::CONTROL,
+        }));
+        app.update(Msg::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 10,
+            row,
+            modifiers: KeyModifiers::CONTROL,
+        }));
+    };
+
+    ctrl_click(&mut app, area.y);
+    assert_eq!(
+        app.active_chat, 1,
+        "{tool} ctrl+header click must enter the subagent chat"
+    );
+}
+
+#[test]
+fn typing_in_running_subagent_routes_prompt_to_that_agent() {
+    let mut app = test_app();
+    app.status = Status::Streaming;
+    app.run_id = 1;
+    let (prompt_tx, prompt_rx) = flume::bounded::<String>(32);
+    app.update(subagent_msg(
+        AgentEvent::TextDelta {
+            text: "running".into(),
+        },
+        "task1",
+        Some("research"),
+    ));
+    let info = subagent_info_with_channels("task1", "task1", "research", None, Some(prompt_tx));
+    app.handle_agent_event(Envelope {
+        event: AgentEvent::TextDelta { text: "x".into() },
+        subagent: Some(info),
+        run_id: 1,
+    });
+    assert_eq!(app.chats.len(), 2);
+    assert_eq!(app.active_chat, 0);
+    app.active_chat = 1;
+
+    app.update(Msg::Key(key(KeyCode::Char('f'))));
+    app.update(Msg::Key(key(KeyCode::Char('o'))));
+    app.update(Msg::Key(key(KeyCode::Char('l'))));
+    app.update(Msg::Key(key(KeyCode::Char('l'))));
+    app.update(Msg::Key(key(KeyCode::Char('o'))));
+    app.update(Msg::Key(key(KeyCode::Char('w'))));
+    app.update(Msg::Key(key(KeyCode::Enter)));
+
+    assert_eq!(prompt_rx.try_recv().unwrap(), "follow");
 }

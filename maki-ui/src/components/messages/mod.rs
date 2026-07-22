@@ -867,6 +867,19 @@ impl MessagesPanel {
         selection::extract_selection_text(&self.cache, self.viewport_width, sel, msg_area)
     }
 
+    pub fn tool_id_at(&self, row: u16, area: Rect) -> Option<&str> {
+        if area.height == 0 {
+            return None;
+        }
+        let doc_row = (row.saturating_sub(area.y)) as u32 + self.scroll_top as u32;
+        let (_, segment, segment_start) =
+            self.cache.segment_at_row(doc_row, self.viewport_width)?;
+        let rel = u16::try_from(doc_row - segment_start).ok()?;
+        (segment.source_line_at(rel, self.viewport_width) == Some(0))
+            .then_some(segment.tool_id.as_deref())
+            .flatten()
+    }
+
     fn tool_in_progress(&self, tool_id: &str) -> bool {
         self.messages
             .iter()

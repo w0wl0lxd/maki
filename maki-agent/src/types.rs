@@ -832,6 +832,8 @@ pub struct SubagentInfo {
     pub model: Option<String>,
     #[serde(skip)]
     pub answer_tx: Option<flume::Sender<String>>,
+    #[serde(skip)]
+    pub prompt_tx: Option<flume::Sender<String>>,
 }
 
 #[derive(Debug, Clone)]

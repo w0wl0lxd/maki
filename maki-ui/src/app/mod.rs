@@ -92,6 +92,7 @@ const IMPLEMENT_MSG_PREFIX: &str = "Implement the plan";
 const IMPLEMENT_PARALLEL_HINT: &str = "Use batch+task to parallelize, assign each subagent a separate module and restrict its tests to that module to avoid interference.";
 
 const TASK_DONE_DETAIL: &str = "✓ ";
+const STEERING_UNAVAILABLE_MSG: &str = "This agent is no longer accepting messages";
 
 #[derive(Clone)]
 pub(super) struct TaskEntry {
@@ -117,6 +118,10 @@ pub(super) enum PendingInput {
     None,
     AuthRetry {
         subagent_id: Option<String>,
+    },
+    #[allow(dead_code)]
+    SubagentFollowUp {
+        subagent_id: String,
     },
 }
 
@@ -181,6 +186,7 @@ pub struct App {
     pub(crate) restore_event_tx: Option<maki_agent::EventSender>,
     pub(super) restoring: Arc<AtomicBool>,
     subagent_answers: HashMap<String, flume::Sender<String>>,
+    subagent_prompts: HashMap<String, flume::Sender<String>>,
 }
 
 impl App {
@@ -259,6 +265,7 @@ impl App {
             restore_event_tx: None,
             restoring: Arc::new(AtomicBool::new(false)),
             subagent_answers: HashMap::new(),
+            subagent_prompts: HashMap::new(),
         };
         app.model_picker
             .set_recents(maki_storage::model::read_recents(&app.storage));
@@ -374,6 +381,17 @@ impl App {
         } else {
             self.send_answer(answer);
         }
+    }
+
+    fn send_subagent_prompt(&mut self, subagent_id: &str, message: String) -> bool {
+        let sent = self
+            .subagent_prompts
+            .get(subagent_id)
+            .is_some_and(|tx| tx.try_send(message.clone()).is_ok());
+        if sent && let Some(&idx) = self.chat_index.get(subagent_id) {
+            self.chats[idx].show_user_message(message);
+        }
+        sent
     }
 
     fn handle_scroll(&mut self, column: u16, row: u16, delta: i32) {
@@ -840,7 +858,32 @@ impl App {
                 self.send_to_agent(subagent_id.as_deref(), String::new());
                 return vec![];
             }
+            PendingInput::SubagentFollowUp { subagent_id } => {
+                if !self.send_subagent_prompt(&subagent_id, sub.text) {
+                    self.flash(STEERING_UNAVAILABLE_MSG.into());
+                }
+                return vec![];
+            }
             PendingInput::None => {}
+        }
+        if !self.is_main_chat() {
+            if sub.is_empty() {
+                return vec![];
+            }
+            let subagent_id = self
+                .chat_index
+                .iter()
+                .find(|&(_, &idx)| idx == self.active_chat)
+                .map(|(id, _)| id.clone());
+            let Some(tool_use_id) = subagent_id else {
+                return vec![];
+            };
+            if self.subagent_prompts.contains_key(&tool_use_id) {
+                self.send_subagent_prompt(&tool_use_id, sub.text);
+            } else {
+                self.flash(STEERING_UNAVAILABLE_MSG.into());
+            }
+            return vec![];
         }
         if sub.is_empty() {
             return vec![];
@@ -875,6 +918,7 @@ impl App {
         self.pending_input = PendingInput::None;
         self.finish_subagents(DisplayRole::Error, CANCELLED_TEXT);
         self.subagent_answers.clear();
+        self.subagent_prompts.clear();
         self.shell.cancel_all();
         for chat in &mut self.chats {
             chat.flush();
@@ -1117,6 +1161,9 @@ impl App {
         self.chat_index.insert(id.clone(), idx);
         if let Some(ref tx) = subagent.answer_tx {
             self.subagent_answers.insert(id.clone(), tx.clone());
+        }
+        if let Some(ref tx) = subagent.prompt_tx {
+            self.subagent_prompts.insert(id.clone(), tx.clone());
         }
         self.chats[0].update_tool_summary(id, &subagent.name);
         if let Some(ref model) = subagent.model {

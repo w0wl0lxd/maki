@@ -976,10 +976,11 @@ pub(crate) fn stub_session(tools: &[(&str, &str)]) -> McpSession {
     let inner = McpManagerInner {
         entries: vec![entry],
         generation: 0,
+        max_desc_chars: maki_config::DEFAULT_MCP_TOOL_DESC_MAX_CHARS,
     };
     let index = Arc::new(ArcSwap::from_pointee(ToolIndex::default()));
     let snapshot = Arc::new(ArcSwap::from_pointee(McpSnapshot::default()));
-    publish(&inner, &index, &snapshot);
+    publish(&inner, &index, &snapshot, inner.max_desc_chars);
     McpSession::new(
         McpHandle {
             cmd_tx: flume::unbounded().0,
@@ -1803,7 +1804,7 @@ mod tests {
 
         let descriptors = &index.load().descriptors;
         assert_eq!(descriptors.len(), 1);
-        let desc = descriptors[0]["description"].as_str().unwrap();
+        let desc = descriptors[0].definition["description"].as_str().unwrap();
         assert!(desc.len() <= 103);
         assert!(desc.ends_with("..."));
     }
@@ -1828,7 +1829,7 @@ mod tests {
 
         let descriptors = &index.load().descriptors;
         assert_eq!(descriptors.len(), 1);
-        let schema = &descriptors[0]["input_schema"];
+        let schema = &descriptors[0].definition["input_schema"];
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"].is_object());
     }

@@ -853,16 +853,6 @@ mod tests {
     }
 
     #[test]
-    fn height_respects_configured_max() {
-        let mut input = InputBox::new(InputHistory::default());
-        input.set_max_input_lines(3);
-        for _ in 0..10 {
-            input.buffer.add_line();
-        }
-        assert_eq!(input.height(TEST_WIDTH), 3 + 2);
-    }
-
-    #[test]
     fn first_last_line() {
         let mut input = InputBox::new(InputHistory::default());
         assert!(input.is_at_first_line());

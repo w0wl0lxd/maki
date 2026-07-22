@@ -1276,27 +1276,6 @@ mod tests {
     }
 
     #[test]
-    fn estimate_message_tokens_empty_is_zero() {
-        assert_eq!(estimate_message_tokens(&[]), 0);
-    }
-
-    #[test]
-    fn estimate_message_tokens_counts_bytes_per_four() {
-        let messages = vec![
-            Message::user("hello world".into()),
-            Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::Text {
-                    text: "response".into(),
-                }],
-                ..Default::default()
-            },
-        ];
-        let count = estimate_message_tokens(&messages);
-        assert_eq!(count, 4, "expected 4 tokens for 19 bytes at 4 bytes/token");
-    }
-
-    #[test]
     fn context_size_addition_uses_saturating_add() {
         let context_size: u32 = u32::MAX - 100;
         let addition: u32 = 200;

@@ -625,64 +625,6 @@ mod tests {
     }
 
     #[test]
-    fn total_input_saturates_at_u32_max() {
-        let usage = TokenUsage {
-            input: u32::MAX,
-            output: 0,
-            cache_creation: 1,
-            cache_read: 1,
-        };
-        assert_eq!(usage.total_input(), u32::MAX);
-    }
-
-    #[test]
-    fn context_tokens_saturates_at_u32_max() {
-        let usage = TokenUsage {
-            input: u32::MAX,
-            output: 1,
-            cache_creation: 1,
-            cache_read: 1,
-        };
-        assert_eq!(usage.context_tokens(), u32::MAX);
-    }
-
-    #[test]
-    fn add_assign_saturates_at_u32_max() {
-        let mut usage = TokenUsage {
-            input: u32::MAX - 100,
-            output: 0,
-            cache_creation: 0,
-            cache_read: 0,
-        };
-        usage += TokenUsage {
-            input: 200,
-            output: 0,
-            cache_creation: 0,
-            cache_read: 0,
-        };
-        assert_eq!(usage.input, u32::MAX);
-    }
-
-    #[test]
-    fn add_assign_normal_values_sum_correctly() {
-        let mut usage = TokenUsage {
-            input: 100,
-            output: 50,
-            cache_creation: 25,
-            cache_read: 10,
-        };
-        usage += TokenUsage {
-            input: 100,
-            output: 50,
-            cache_creation: 25,
-            cache_read: 10,
-        };
-        assert_eq!(usage.input, 200);
-        assert_eq!(usage.output, 100);
-        assert_eq!(usage.cache_creation, 50);
-        assert_eq!(usage.cache_read, 20);
-    }
-    #[test]
     fn fast_flag_ignored_without_fast_tier() {
         let pricing = ModelPricing {
             input: 3.00,

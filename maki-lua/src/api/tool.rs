@@ -214,10 +214,13 @@ impl Tool for LuaTool {
             &DEFAULT
         } else {
             self.mode_cache.get_or_init(|| {
-                self.modes.iter().map(|s| {
-                    let leaked: &'static str = Box::leak(s.clone().into_boxed_str());
-                    leaked
-                }).collect()
+                self.modes
+                    .iter()
+                    .map(|s| {
+                        let leaked: &'static str = Box::leak(s.clone().into_boxed_str());
+                        leaked
+                    })
+                    .collect()
             })
         }
     }

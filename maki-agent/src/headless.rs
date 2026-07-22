@@ -158,10 +158,19 @@ fn tool_definitions(params: &ToolDefinitionsParams) -> Value {
 
     let tools = if params.config.dynamic_tools.enabled {
         let mode = &params.config.dynamic_tools.default_mode;
-        let allowed = params.registry.active_tools_for_mode(mode, params.additional_active);
-        params.registry.definitions_filtered(params.vars, &ctx, params.model.supports_tool_examples(), &allowed)
+        let allowed = params
+            .registry
+            .active_tools_for_mode(mode, params.additional_active);
+        params.registry.definitions_filtered(
+            params.vars,
+            &ctx,
+            params.model.supports_tool_examples(),
+            &allowed,
+        )
     } else {
-        params.registry.definitions(params.vars, &ctx, params.model.supports_tool_examples())
+        params
+            .registry
+            .definitions(params.vars, &ctx, params.model.supports_tool_examples())
     };
 
     let mut tools = tools;

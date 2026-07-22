@@ -10,7 +10,7 @@ local output_limits = require("maki.output_limits")
 maki.api.set_prompt({
   prompt = "system",
   slot = "environment",
-  content = "Current date: " .. os.date("%Y-%m-%d"),
+  content = "# Environment\nCurrent date: " .. os.date("%Y-%m-%d"),
 })
 
 local opts = maki.api.register_options(output_limits.extend({

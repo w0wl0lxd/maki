@@ -440,11 +440,16 @@ impl From<TokenUsage> for StoredTokenUsage {
 
 impl TokenUsage {
     pub fn total_input(&self) -> u32 {
-        self.input + self.cache_read + self.cache_creation
+        self.input
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_creation)
     }
 
     pub fn context_tokens(&self) -> u32 {
-        self.input + self.output + self.cache_creation + self.cache_read
+        self.input
+            .saturating_add(self.output)
+            .saturating_add(self.cache_creation)
+            .saturating_add(self.cache_read)
     }
 
     pub fn cost(&self, pricing: &ModelPricing, fast: bool) -> f64 {
@@ -471,10 +476,10 @@ impl TokenUsage {
 
 impl AddAssign for TokenUsage {
     fn add_assign(&mut self, rhs: Self) {
-        self.input += rhs.input;
-        self.output += rhs.output;
-        self.cache_creation += rhs.cache_creation;
-        self.cache_read += rhs.cache_read;
+        self.input = self.input.saturating_add(rhs.input);
+        self.output = self.output.saturating_add(rhs.output);
+        self.cache_creation = self.cache_creation.saturating_add(rhs.cache_creation);
+        self.cache_read = self.cache_read.saturating_add(rhs.cache_read);
     }
 }
 

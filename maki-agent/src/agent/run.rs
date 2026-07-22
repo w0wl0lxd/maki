@@ -27,61 +27,6 @@ use maki_storage::id::SessionRef;
 const MAX_REAUTH_ATTEMPTS: u32 = 2;
 const NUDGE_PROMPT: &str = "You just executed tool calls but returned an empty response. Please process the tool results above and continue with the task.";
 
-pub(super) fn filter_tool_result(content: &str) -> String {
-    let mut lines = Vec::new();
-    let mut last_was_blank = false;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.is_empty() {
-            if !last_was_blank {
-                lines.push(String::new());
-                last_was_blank = true;
-            }
-            continue;
-        }
-
-        last_was_blank = false;
-
-        if is_progress_line(trimmed) {
-            continue;
-        }
-
-        lines.push(line.to_string());
-    }
-
-    while lines.last().is_some_and(String::is_empty) {
-        lines.pop();
-    }
-
-    lines.join("\n")
-}
-
-fn is_progress_line(trimmed: &str) -> bool {
-    if trimmed.starts_with("...")
-        || trimmed.starts_with("==>")
-        || trimmed.starts_with("-->")
-        || trimmed.contains("progress")
-        || trimmed.contains("Processing")
-        || trimmed.contains("Downloading")
-        || trimmed.contains("Installing")
-        || trimmed.contains("Building")
-        || trimmed.contains("Compiling")
-    {
-        return true;
-    }
-
-    if let Some(prefix) = trimmed.strip_suffix('%') {
-        let without_pct = prefix.trim();
-        if !without_pct.is_empty() && without_pct.chars().all(|c| c.is_ascii_digit() || c == '.') {
-            return true;
-        }
-    }
-
-    false
-}
-
 pub fn resolve_compaction_model(
     provider: &Arc<dyn Provider>,
     model: &Model,
@@ -333,8 +278,9 @@ impl<'h> Agent<'h> {
         if has_tools {
             let history_len_before = self.history.len();
             self.process_tool_calls(response).await?;
-            self.context_size +=
-                estimate_message_tokens(&self.history.as_slice()[history_len_before..]);
+            self.context_size = self.context_size.saturating_add(estimate_message_tokens(
+                &self.history.as_slice()[history_len_before..],
+            ));
         } else {
             let has_text = response.message.first_text_content().is_some();
 

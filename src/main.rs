@@ -1,5 +1,3 @@
-#![allow(semicolon_in_expressions_from_macros)]
-
 mod cli;
 mod cmd;
 mod print;

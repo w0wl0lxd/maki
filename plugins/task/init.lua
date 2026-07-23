@@ -185,6 +185,7 @@ local function handler(input, ctx)
   end
 
   local preview = make_preview(ctx, input.description or "task")
+  ctx:live_buf(preview.buf)
 
   local function on_finish(err, result)
     if err then

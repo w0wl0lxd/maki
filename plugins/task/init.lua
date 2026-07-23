@@ -242,7 +242,7 @@ local function handler(input, ctx)
           if not progress then
             return
           end
-          preview:update(progress)
+          preview.update(progress)
           if progress.done then
             return
           end

@@ -100,20 +100,19 @@ fn terminfo_advertises() -> bool {
         || (info.extended_cap("setrgbf").is_some() && info.extended_cap("setrgbb").is_some())
 }
 
-/// A terminal that applied the RGB background echoes `48:2` (or `48;2`)
-/// back in its DECRQSS SGR report; one that ignored it does not.
+#[cfg(unix)]
 fn decrqss_reply_supports_rgb(buf: &[u8]) -> bool {
     contains(buf, b"48:2") || contains(buf, b"48;2")
 }
 
-/// DA1 reply (`ESC [ ? ... c`) marks the end of the probe: it is requested
-/// last and every terminal answers it, so replies stay ordered.
+#[cfg(unix)]
 fn da1_answered(buf: &[u8]) -> bool {
     buf.windows(3)
         .position(|w| w == b"\x1b[?")
         .is_some_and(|start| buf[start + 3..].contains(&b'c'))
 }
 
+#[cfg(unix)]
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
@@ -254,6 +253,7 @@ mod tests {
         assert_eq!(truecolor_from_env(get), expected);
     }
 
+    #[cfg(unix)]
     #[test_case(b"\x1bP1$r0;48:2:1:2:3m\x1b\\\x1b[?65;1;9c", true; "kitty_style_colon_reply")]
     #[test_case(b"\x1bP1$r0;48;2;1;2;3m\x1b\\\x1b[?65;1;9c", true; "semicolon_reply")]
     #[test_case(b"\x1bP1$r0m\x1b\\\x1b[?1;2c", false; "rgb_ignored_by_terminal")]
@@ -263,6 +263,7 @@ mod tests {
         assert_eq!(decrqss_reply_supports_rgb(buf), expected);
     }
 
+    #[cfg(unix)]
     #[test_case(b"\x1b[?65;1;9c", true; "da1_reply")]
     #[test_case(b"\x1bP1$r0;48:2:1:2:3m\x1b\\", false; "decrqss_only")]
     #[test_case(b"\x1b[?65;1;9", false; "partial_da1")]

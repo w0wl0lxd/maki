@@ -98,7 +98,8 @@ local function make_preview(ctx, description)
     if progress.completed_count > last_completed then
       local new_count = progress.completed_count - last_completed
       local recent = progress.recent_tools
-      local start = new_count <= #recent and (#recent - new_count + 1) or 1
+      local available = math.min(new_count, #recent)
+      local start = #recent - available + 1
       for i = start, #recent do
         view:append({ { "✓ " .. recent[i], "dim" } })
       end

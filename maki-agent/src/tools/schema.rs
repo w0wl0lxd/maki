@@ -636,7 +636,14 @@ fn coerce_str_to(s: &str, expected: ParamKind) -> Option<Value> {
 
     let repaired = repair_loads(s, &RepairOpts::default()).ok()?;
     if ParamKind::of(&repaired) == expected {
-        debug!(input = %preview(s), "repaired malformed JSON");
+        let repaired_str = repaired.to_string();
+        if repaired_str != s {
+            debug!(
+                input = %preview(s),
+                repaired = %preview(&repaired_str),
+                "sanitizer rewrote JSON"
+            );
+        }
         Some(repaired)
     } else {
         None

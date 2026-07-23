@@ -99,6 +99,46 @@ function Install-Maki([string]$Tag) {
     }
 }
 
+<<<<<<< HEAD
+||||||| parent of cf74e896 (fix(bash,config,ui,lua): resolve bash or wsl on windows and centralize command building)
+function Test-BashAvailable {
+    $paths = $env:Path -split ';'
+    foreach ($dir in $paths) {
+        $bashPath = Join-Path $dir.Trim('"') "bash.exe"
+        if (Test-Path -LiteralPath $bashPath -PathType Leaf) {
+            return $true
+        }
+    }
+    $candidates = @(
+        "C:\Program Files\Git\bin\bash.exe",
+        "C:\Program Files\Git\usr\bin\bash.exe",
+        "C:\Program Files (x86)\Git\bin\bash.exe",
+        "C:\cygwin64\bin\bash.exe",
+        "C:\cygwin\bin\bash.exe",
+        "C:\msys64\usr\bin\bash.exe",
+        "C:\msys32\usr\bin\bash.exe"
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return $true
+        }
+    }
+    foreach ($dir in $paths) {
+        $wslPath = Join-Path $dir.Trim('"') "wsl.exe"
+        if (Test-Path -LiteralPath $wslPath -PathType Leaf) {
+            return $true
+        }
+    }
+    if (Test-Path -LiteralPath "C:\Windows\System32\wsl.exe" -PathType Leaf) {
+        return $true
+    }
+    return $false
+}
+
+function Test-WinGetAvailable {
+    return $null -ne (Get-Command winget -ErrorAction Ignore)
+}
+
 function Add-ToUserPath([string]$Dir) {
     $sep = [IO.Path]::PathSeparator
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")

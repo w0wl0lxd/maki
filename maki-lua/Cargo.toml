@@ -67,17 +67,7 @@ tree-sitter-typescript = { workspace = true }
 tree-sitter-zig = { workspace = true }
 tree-sitter-dart = { workspace = true }
 tree-sitter-yaml = { workspace = true }
-tree-sitter-astro-next = { workspace = true }
-tree-sitter-containerfile = { workspace = true }
-tree-sitter-css = { workspace = true }
-tree-sitter-hcl = { workspace = true }
-tree-sitter-json = { workspace = true }
-tree-sitter-make = { workspace = true }
-cortexkit-tree-sitter-scss = { workspace = true }
-tree-sitter-svelte-ng = { workspace = true }
-tree-sitter-vue-next = { workspace = true }
-[target.'cfg(unix)'.dependencies]
-libc = { workspace = true }
+tree-sitter-scss = { workspace = true }
 
 [dev-dependencies]
 base64 = { workspace = true }
@@ -92,6 +82,8 @@ name = "luau_perf"
 harness = false
 
 [package.metadata.cargo-machete]
-# cortexkit-tree-sitter-scss is required at runtime for SCSS indexing on
-# Windows MSVC; cargo-machete cannot detect the dynamic plugin load path.
-ignored = ["cortexkit-tree-sitter-scss"]
+# tree-sitter-scss is required at runtime for SCSS indexing.
+ignored = ["tree-sitter-scss"]
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }

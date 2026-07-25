@@ -12,7 +12,7 @@ use maki_agent::{
 };
 use maki_providers::Message;
 
-use maki_config;
+use maki_config::bash_command;
 
 use super::App;
 
@@ -201,7 +201,7 @@ async fn run_command(
     max_output_lines: usize,
     max_output_bytes: usize,
 ) -> Result<String, String> {
-let mut std_cmd: StdCommand = maki_config::bash_command(command)?;
+let mut std_cmd: StdCommand = bash_command(command, None)?;
     std_cmd.env("GIT_TERMINAL_PROMPT", "0");
     #[cfg(unix)]
     unsafe {

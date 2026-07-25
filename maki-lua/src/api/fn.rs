@@ -60,7 +60,7 @@ impl JobStore {
         on_exit: Option<RegistryKey>,
     ) -> Result<u32, String> {
         let mut command = match spec {
-            JobSpec::Shell(cmd) => maki_config::bash_command(&cmd)?,
+            JobSpec::Shell(cmd) => maki_config::bash_command(&cmd, env.as_ref())?,
             JobSpec::Program { program, args } => {
                 let mut c = Command::new(&program);
                 c.args(&args);
@@ -274,31 +274,37 @@ fn kill_job(meta: &mut JobMeta) {
 ///   on_exit = function(_, code) print("exit: " .. code) end,
 /// })
 #[lua_fn(guard = Run)]
-fn jobstart(lua: &Lua, cmd: Value, opts: Option<Table>) -> LuaResult<u32> {
+fn jobstart(lua: &Lua, cmd: Value, opts: Option<Table>) -> LuaResult<i32> {
     let spec = match cmd {
         Value::String(s) => JobSpec::Shell(s.to_str()?.to_owned()),
         Value::Table(tbl) => {
-            // Treat tables as arrays (list mode): first element is program, rest are args
             let len = tbl.len().unwrap_or(0);
             if len == 0 {
                 return Err(mlua::Error::runtime(
                     "jobstart array must have at least a program",
                 ));
             }
-            let program: String = tbl
-                .get::<String>(1)
-                .map_err(|e| mlua::Error::runtime(format!("jobstart program must be a string: {e}")))?;
+            let program: String = match tbl.get::<Value>(1)? {
+                Value::String(s) => s.to_str()?.to_owned(),
+                _ => {
+                    return Err(mlua::Error::runtime(
+                        "jobstart program must be a string",
+                    ));
+                }
+            };
             if program.is_empty() {
                 return Err(mlua::Error::runtime(
                     "jobstart program cannot be empty string",
                 ));
             }
-            // Collect remaining args, filtering out empty strings
             let args: Vec<String> = (2..=len)
-                .into_iter()
-                .filter_map(|i| tbl.get::<String>(i).ok())
-                .filter(|s| !s.is_empty())
-                .collect();
+                .map(|i| match tbl.get::<Value>(i)? {
+                    Value::String(s) => Ok(s.to_str()?.to_owned()),
+                    _ => Err(mlua::Error::runtime(format!(
+                        "jobstart arg {i} must be a string"
+                    ))),
+                })
+                .collect::<Result<_, _>>()?;
             JobSpec::Program { program, args }
         }
         _ => {
@@ -335,10 +341,11 @@ fn jobstart(lua: &Lua, cmd: Value, opts: Option<Table>) -> LuaResult<u32> {
         None => (None, None, None, None, None),
     };
 
-    with_task_jobs(lua, |store| {
+    Ok(with_task_jobs(lua, |store| {
         store.start(spec, cwd, env, on_stdout, on_stderr, on_exit)
     })
-    .map_err(mlua::Error::runtime)
+    .map(|id| id as i32)
+    .unwrap_or(-1))
 }
 
 /// Kill a running job immediately (SIGKILL on Unix). Safe to call on

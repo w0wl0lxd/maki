@@ -133,7 +133,6 @@ const STRING_NAME_SCHEMA: &str = r#"{
     required = { "name" },
 }"#;
 const JOB_BAD_CWD: &str = "~/definitely/not/a/dir";
-const JOB_BAD_CWD_ERR_PREFIX: &str = "cwd is not a directory: ";
 const NIL_WITHOUT_JOBS_ERR: &str =
     "handler returned nil without calling ctx:finish() or starting jobs";
 const FINISH_CALLED_TWICE_ERR: &str = "ctx:finish() already called";
@@ -1105,7 +1104,7 @@ fn jobwait_fires_callbacks_while_waiting() {
 }
 
 #[test]
-fn jobstart_invalid_cwd_errors_with_expanded_path() {
+fn jobstart_invalid_cwd_returns_minus_one() {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
     let src = format!(
@@ -1115,18 +1114,14 @@ fn jobstart_invalid_cwd_errors_with_expanded_path() {
             schema = {MINIMAL_SCHEMA},
             audiences = {{ "main" }},
             handler = function(input, ctx)
-                local _, err = pcall(maki.fn.jobstart, "pwd", {{ cwd = "{JOB_BAD_CWD}" }})
-                return tostring(err)
+                local id = maki.fn.jobstart("pwd", {{ cwd = "{JOB_BAD_CWD}" }})
+                return tostring(id)
             end
-        }})"#,
+        }})"#
     );
     host.load_source("job_bad_cwd", &src).unwrap();
     let out = exec_tool(&reg, "job_bad_cwd", serde_json::json!({})).unwrap();
-    let expanded = maki_storage::paths::home()
-        .expect("home dir")
-        .join(JOB_BAD_CWD.strip_prefix("~/").unwrap());
-    let expected = format!("{JOB_BAD_CWD_ERR_PREFIX}{}", expanded.display());
-    assert!(out.contains(&expected), "got: {out}");
+    assert_eq!(out, "-1", "invalid cwd should return -1, got: {out}");
 }
 
 #[test]
@@ -3383,6 +3378,7 @@ fn job_callbacks_fire_while_command_handler_parked() {
 
 /// List mode runs the program directly without shell interpretation.
 /// This preserves argument quoting (the core fix for #602).
+/// Using `$HOME` as an arg: shell mode would expand it, list mode keeps it literal.
 #[test]
 fn jobstart_list_mode_preserve_arg_quoting() {
     let reg = fresh_registry();
@@ -3394,17 +3390,18 @@ fn jobstart_list_mode_preserve_arg_quoting() {
             schema = {MINIMAL_SCHEMA},
             audiences = {{ "main" }},
             handler = function(input, ctx)
-                maki.fn.jobstart({{"echo", "hello world"}}, {{
-                    on_exit = function(_, code)
-                        ctx:finish("exit=" .. tostring(code))
-                    end
+                local seen = {{}}
+                maki.fn.jobstart({{"echo", "$HOME"}}, {{
+                    on_stdout = function(_, line) seen[#seen + 1] = line end
                 }})
+                local res = maki.fn.jobwait(1)
+                return table.concat(seen, ",")
             end
         }})"#
     );
     host.load_source("job_list", &src).unwrap();
     let out = exec_tool(&reg, "job_list", serde_json::json!({})).unwrap();
-    assert_eq!(out, "exit=0");
+    assert_eq!(out, "$HOME", "list mode must keep $HOME literal, got: {out}");
 }
 
 /// List mode with multiple args works correctly.
@@ -3469,13 +3466,66 @@ fn jobstart_list_mode_non_string_arg_errors() {
             schema = {MINIMAL_SCHEMA},
             audiences = {{ "main" }},
             handler = function(input, ctx)
-                local _, err = pcall(maki.fn.jobstart, {{123, "echo"}})
-                return tostring(err)
+                local ok, err = pcall(maki.fn.jobstart, {{123, "echo"}})
+                if not ok then
+                    return tostring(err)
+                end
+                return "no error"
             end
         }})"#
     );
     host.load_source("job_nonstr", &src).unwrap();
     let out = exec_tool(&reg, "job_nonstr", serde_json::json!({})).unwrap();
-    // When a non-string is in the array, mlua's get::<String> will error
-    assert!(out.len() > 0, "got empty error string");
+    assert!(
+        out.contains("must be a string"),
+        "expected error about non-string arg, got: {out}"
+    );
+}
+
+/// Empty-string args are passed through, not filtered out (matches nvim).
+#[test]
+fn jobstart_list_mode_empty_string_arg_preserved() {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let src = format!(
+        r#"maki.api.register_tool({{
+            name = "job_empty_arg",
+            description = "empty string arg preserved",
+            schema = {MINIMAL_SCHEMA},
+            audiences = {{ "main" }},
+            handler = function(input, ctx)
+                local seen = {{}}
+                maki.fn.jobstart({{"printf", "%s", ""}}, {{
+                    on_stdout = function(_, line) seen[#seen + 1] = line end
+                }})
+                local res = maki.fn.jobwait(1)
+                return table.concat(seen, ",")
+            end
+        }})"#
+    );
+    host.load_source("job_empty_arg", &src).unwrap();
+    let out = exec_tool(&reg, "job_empty_arg", serde_json::json!({})).unwrap();
+    assert_eq!(out, "", "empty string arg should be passed through");
+}
+
+/// Spawn failure returns -1 instead of throwing (matches nvim).
+#[test]
+fn jobstart_spawn_failure_returns_minus_one() {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let src = format!(
+        r#"maki.api.register_tool({{
+            name = "job_fail",
+            description = "nonexistent program returns -1",
+            schema = {MINIMAL_SCHEMA},
+            audiences = {{ "main" }},
+            handler = function(input, ctx)
+                local id = maki.fn.jobstart({{"/nonexistent/program/that/does/not/exist"}})
+                return tostring(id)
+            end
+        }})"#
+    );
+    host.load_source("job_fail", &src).unwrap();
+    let out = exec_tool(&reg, "job_fail", serde_json::json!({})).unwrap();
+    assert_eq!(out, "-1", "spawn failure should return -1, got: {out}");
 }
